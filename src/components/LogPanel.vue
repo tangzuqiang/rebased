@@ -376,7 +376,8 @@ function checkoutRef(name: string) {
             :key="commit.hash"
             type="button"
             class="row"
-            :class="{ selected: commit.hash === selectedHash }"
+            :class="{ selected: commit.hash === selectedHash, merge: commit.parents.length > 1 }"
+            :title="commit.parents.length > 1 ? '合并提交' : commit.message"
             @click="emit('select', commit.hash)"
             @contextmenu="openMenu($event, commit.hash)"
           >
@@ -407,6 +408,7 @@ function checkoutRef(name: string) {
                 </template>
               </svg>
               <span class="msg">{{ commit.message }}</span>
+              <span v-if="commit.parents.length > 1" class="merge-tag">合并</span>
             </span>
             <span class="col-ref">
               <span v-if="commit.hash === repo.head" class="ref head">HEAD</span>
@@ -624,6 +626,26 @@ function checkoutRef(name: string) {
 
 .row.selected {
   background: var(--bg-selected);
+}
+
+.row.merge .msg {
+  color: #d2a8ff;
+  font-weight: 600;
+}
+
+.row.merge.selected .msg {
+  color: #efd4ff;
+}
+
+.merge-tag {
+  flex: none;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: #5b3d7a;
+  color: #efd4ff;
+  font-size: 11px;
+  line-height: 16px;
 }
 
 .col-msg {

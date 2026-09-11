@@ -1,6 +1,7 @@
 mod ai;
 mod git;
 mod store;
+mod term;
 
 use git::{
     AppState, BranchInfo, FileDiff, FilePreview, GitCommit, GitFile, MergeFileContent, MergeOutcome,
@@ -8,7 +9,7 @@ use git::{
 };
 use std::path::PathBuf;
 use store::{AppStore, RecentProject, SessionState};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 fn repo_dir(state: &AppState, repo: Option<String>) -> Result<PathBuf, String> {
     state.resolve_repo(repo.as_deref())
@@ -402,6 +403,38 @@ fn working_tree_diff(state: State<AppState>, rev: String, repo: Option<String>) 
     git::working_tree_diff(&repo_dir(&state, repo)?, &rev)
 }
 
+#[tauri::command]
+fn start_terminal(
+    app: AppHandle,
+    hub: State<term::TerminalHub>,
+    id: String,
+    cwd: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    term::start(&*hub, app, id, cwd, cols, rows)
+}
+
+#[tauri::command]
+fn write_terminal(hub: State<term::TerminalHub>, id: String, data: String) -> Result<(), String> {
+    term::write(&*hub, &id, &data)
+}
+
+#[tauri::command]
+fn resize_terminal(
+    hub: State<term::TerminalHub>,
+    id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    term::resize(&*hub, &id, cols, rows)
+}
+
+#[tauri::command]
+fn close_terminal(hub: State<term::TerminalHub>, id: String) -> Result<(), String> {
+    term::close(&*hub, &id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -409,6 +442,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
         .manage(AppStore::open())
+        .manage(term::TerminalHub::new())
         .invoke_handler(tauri::generate_handler![
             open_repo,
             get_repo,
@@ -466,7 +500,11 @@ pub fn run() {
             rename_branch,
             set_upstream,
             update_branch,
-            working_tree_diff
+            working_tree_diff,
+            start_terminal,
+            write_terminal,
+            resize_terminal,
+            close_terminal
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

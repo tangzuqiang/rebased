@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use std::time::Duration;
 
 pub struct AppState {
     pub repo: Mutex<Option<PathBuf>>,
@@ -84,12 +85,80 @@ pub struct StatusPayload {
 }
 
 fn run_git(repo: &Path, args: &[&str]) -> Result<String, String> {
-    let (ok, stdout, stderr) = exec_git(repo, args)?;
-    if !ok {
-        let msg = if !stderr.trim().is_empty() { stderr } else { stdout };
-        return Err(localize_git_error(msg.trim()));
+    with_index_lock_retry(repo, || exec_git(repo, args))
+}
+
+fn is_index_lock_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("index.lock") && (lower.contains("file exists") || lower.contains("unable to create"))
+}
+
+fn index_lock_path(repo: &Path) -> PathBuf {
+    let git = repo.join(".git");
+    if git.is_file() {
+        if let Ok(text) = std::fs::read_to_string(&git) {
+            if let Some(dir) = text.strip_prefix("gitdir:") {
+                return PathBuf::from(dir.trim()).join("index.lock");
+            }
+        }
     }
-    Ok(stdout)
+    git.join("index.lock")
+}
+
+fn git_process_running() -> bool {
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("tasklist");
+        cmd.args(["/FI", "IMAGENAME eq git.exe", "/FO", "CSV", "/NH"]);
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        cmd.output()
+            .map(|out| decode(&out.stdout).to_ascii_lowercase().contains("git.exe"))
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("pgrep")
+            .args(["-x", "git"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+}
+
+fn clear_stale_index_lock(repo: &Path) -> bool {
+    let lock = index_lock_path(repo);
+    if !lock.is_file() || git_process_running() {
+        return false;
+    }
+    std::fs::remove_file(&lock).is_ok()
+}
+
+fn with_index_lock_retry(
+    repo: &Path,
+    mut exec: impl FnMut() -> Result<(bool, String, String), String>,
+) -> Result<String, String> {
+    let mut last = String::new();
+    for attempt in 0..5 {
+        let (ok, stdout, stderr) = exec()?;
+        if ok {
+            return Ok(stdout);
+        }
+        last = if !stderr.trim().is_empty() { stderr } else { stdout };
+        if !is_index_lock_error(&last) {
+            return Err(localize_git_error(last.trim()));
+        }
+        if attempt < 3 {
+            std::thread::sleep(Duration::from_millis(180));
+            continue;
+        }
+        if attempt == 3 {
+            let _ = clear_stale_index_lock(repo);
+        }
+    }
+    Err(localize_git_error(last.trim()))
 }
 
 fn exec_git(repo: &Path, args: &[&str]) -> Result<(bool, String, String), String> {
@@ -1000,8 +1069,11 @@ fn localize_git_error(err: &str) -> String {
     if lower.contains("pathspec") && lower.contains("did not match") {
         return "找不到指定的文件或分支".to_string();
     }
-    if lower.contains("already exists") {
+    if lower.contains("already exists") && !lower.contains("index.lock") {
         return "目标分支或引用已存在".to_string();
+    }
+    if lower.contains("index.lock") {
+        return "Git 索引被占用：可能有未结束的 Git 进程，或上次操作留下了 index.lock。请稍后再试".to_string();
     }
     err.to_string()
 }
@@ -1030,6 +1102,10 @@ fn format_unix(timestamp: i64) -> String {
 }
 
 fn run_git_env(repo: &Path, args: &[&str], envs: &[(&str, String)]) -> Result<String, String> {
+    with_index_lock_retry(repo, || exec_git_env(repo, args, envs))
+}
+
+fn exec_git_env(repo: &Path, args: &[&str], envs: &[(&str, String)]) -> Result<(bool, String, String), String> {
     let mut cmd = Command::new("git");
     cmd.arg("-c")
         .arg("core.quotepath=false")
@@ -1053,13 +1129,7 @@ fn run_git_env(repo: &Path, args: &[&str], envs: &[(&str, String)]) -> Result<St
     let output = cmd
         .output()
         .map_err(|e| format!("无法执行 git，请确认已安装并加入 PATH：{e}"))?;
-    let stdout = decode(&output.stdout);
-    let stderr = decode(&output.stderr);
-    if !output.status.success() {
-        let msg = if !stderr.trim().is_empty() { stderr } else { stdout };
-        return Err(localize_git_error(msg.trim()));
-    }
-    Ok(stdout)
+    Ok((output.status.success(), decode(&output.stdout), decode(&output.stderr)))
 }
 
 pub fn cherry_pick(repo: &Path, hash: &str) -> Result<String, String> {

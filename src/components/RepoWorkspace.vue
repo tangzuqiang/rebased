@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   checkoutBranch,
   commitChanges,
@@ -37,6 +37,7 @@ import ResolveConflictDialog from "./ResolveConflictDialog.vue";
 import PushDialog from "./PushDialog.vue";
 import Modal from "./Modal.vue";
 import StatusBar from "./StatusBar.vue";
+import TerminalPanel from "./TerminalPanel.vue";
 import Toolbar from "./Toolbar.vue";
 
 const props = defineProps<{
@@ -64,6 +65,8 @@ const busy = ref(false);
 const statusText = ref("就绪");
 const errorText = ref("");
 const showFiles = ref(false);
+const showTerminal = ref(false);
+const terminalReady = ref(false);
 const showCommit = ref(false);
 const showPush = ref(false);
 const showMerge = ref(false);
@@ -446,6 +449,21 @@ function openConflicts() {
   }
 }
 
+function toggleTerminal() {
+  showTerminal.value = !showTerminal.value;
+  if (showTerminal.value) {
+    terminalReady.value = true;
+  }
+}
+
+function onGlobalKey(event: KeyboardEvent) {
+  if (!props.active || !repo.value) return;
+  if (event.altKey && event.code === "F12") {
+    event.preventDefault();
+    toggleTerminal();
+  }
+}
+
 watch(
   () => props.active,
   (active) => {
@@ -456,9 +474,14 @@ watch(
 );
 
 onMounted(() => {
+  window.addEventListener("keydown", onGlobalKey);
   if (props.active) {
     void bootstrap(true);
   }
+});
+
+onUnmounted(() => {
+  window.removeEventListener("keydown", onGlobalKey);
 });
 </script>
 
@@ -508,6 +531,13 @@ onMounted(() => {
         />
         <FilesPanel :files="commitFiles" />
       </main>
+      <TerminalPanel
+        v-if="terminalReady"
+        v-show="showTerminal"
+        :repo-path="repoPath"
+        :visible="showTerminal && active"
+        @close="showTerminal = false"
+      />
       <StatusBar :text="statusText" :error="errorText" />
       <CommitDialog
         v-if="active && showCommit"

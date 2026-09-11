@@ -270,3 +270,19 @@ export function listWorktree(repo?: string) {
 export function previewFile(repo: string | undefined, path: string) {
   return invoke<FilePreview>("preview_file", withRepo(repo, { path }));
 }
+
+export function startTerminal(id: string, cwd: string, cols: number, rows: number) {
+  return invoke<void>("start_terminal", { id, cwd, cols, rows });
+}
+
+export function writeTerminal(id: string, data: string) {
+  return invoke<void>("write_terminal", { id, data });
+}
+
+export function resizeTerminal(id: string, cols: number, rows: number) {
+  return invoke<void>("resize_terminal", { id, cols, rows });
+}
+
+export function closeTerminal(id: string) {
+  return invoke<void>("close_terminal", { id });
+}
