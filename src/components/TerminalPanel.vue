@@ -7,11 +7,14 @@ interface TermTab {
   id: string;
   seq: number;
   title: string;
+  cwd: string;
 }
 
 const props = defineProps<{
   repoPath: string;
   visible: boolean;
+  startCwd?: string;
+  spawnSeq?: number;
 }>();
 
 const emit = defineEmits<{
@@ -29,12 +32,13 @@ function tabTitle(index: number) {
   return index === 1 ? "本地" : `本地 (${index})`;
 }
 
-function addTab() {
+function addTab(cwd = props.repoPath) {
   seq += 1;
   const tab: TermTab = {
-    id: `${props.repoPath}::${seq}`,
+    id: `${cwd}::${seq}`,
     seq,
     title: tabTitle(seq),
+    cwd,
   };
   tabs.value.push(tab);
   activeId.value = tab.id;
@@ -81,15 +85,23 @@ function startResize(event: MouseEvent) {
 }
 
 if (!tabs.value.length) {
-  addTab();
+  addTab(props.startCwd || props.repoPath);
 }
 
 watch(
   () => props.visible,
   (visible) => {
     if (visible && !tabs.value.length) {
-      addTab();
+      addTab(props.startCwd || props.repoPath);
     }
+  },
+);
+
+watch(
+  () => props.spawnSeq,
+  (value) => {
+    if (!value) return;
+    addTab(props.startCwd || props.repoPath);
   },
 );
 
@@ -131,7 +143,7 @@ onUnmounted(() => {
         v-show="tab.id === activeId"
         :key="tab.id"
         :id="tab.id"
-        :cwd="repoPath"
+        :cwd="tab.cwd || repoPath"
         :active="visible && tab.id === activeId"
         @error="errorText = $event"
       />

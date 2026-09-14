@@ -1336,6 +1336,44 @@ pub fn list_worktree(repo: &Path) -> Result<Vec<String>, String> {
     Ok(files)
 }
 
+fn os_display_path(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    raw.strip_prefix(r"\\?\")
+        .unwrap_or(&raw)
+        .replace('/', "\\")
+}
+
+pub fn abs_worktree_path(repo: &Path, rel: &str) -> Result<String, String> {
+    Ok(os_display_path(&resolve_worktree_file(repo, rel)?.1))
+}
+
+pub fn reveal_in_os(repo: &Path, rel: &str) -> Result<(), String> {
+    let (_, canonical) = resolve_worktree_file(repo, rel)?;
+    let path = os_display_path(&canonical);
+    let mut cmd = std::process::Command::new("explorer");
+    if canonical.is_dir() {
+        cmd.arg(&path);
+    } else {
+        cmd.arg(format!("/select,{path}"));
+    }
+    cmd.spawn().map_err(|e| format!("无法打开资源管理器：{e}"))?;
+    Ok(())
+}
+
+pub fn open_in_os(repo: &Path, rel: &str) -> Result<(), String> {
+    let path = os_display_path(&resolve_worktree_file(repo, rel)?.1);
+    let mut cmd = std::process::Command::new("cmd");
+    cmd.args(["/C", "start", "", &path]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd.spawn()
+        .map_err(|e| format!("无法用关联程序打开：{e}"))?;
+    Ok(())
+}
+
 pub fn save_worktree_file(repo: &Path, rel: &str, content: &str) -> Result<FilePreview, String> {
     let (rel, canonical) = resolve_worktree_file(repo, rel)?;
     let meta = std::fs::metadata(&canonical).map_err(|e| format!("无法读取文件：{e}"))?;

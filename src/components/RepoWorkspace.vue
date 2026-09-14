@@ -70,6 +70,8 @@ const errorText = ref("");
 const showFiles = ref(false);
 const showTerminal = ref(false);
 const terminalReady = ref(false);
+const termStartCwd = ref("");
+const termSpawnSeq = ref(0);
 const showCommit = ref(false);
 const showPush = ref(false);
 const showMerge = ref(false);
@@ -523,9 +525,20 @@ function toggleTerminal() {
   }
 }
 
+function openTerminalAt(cwd: string) {
+  termStartCwd.value = cwd;
+  if (!terminalReady.value) {
+    terminalReady.value = true;
+    showTerminal.value = true;
+    return;
+  }
+  showTerminal.value = true;
+  termSpawnSeq.value += 1;
+}
+
 function onGlobalKey(event: KeyboardEvent) {
   if (!props.active || !repo.value) return;
-  if (event.altKey && (event.code === "F12" || event.key === "F12")) {
+  if (event.altKey && !event.ctrlKey && (event.code === "F12" || event.key === "F12")) {
     event.preventDefault();
     event.stopPropagation();
     toggleTerminal();
@@ -587,6 +600,7 @@ onUnmounted(() => {
         :repo-path="repoPath"
         @close="showFiles = false"
         @changed="refreshStatus"
+        @open-terminal="openTerminalAt"
       />
       <main v-else class="workspace">
         <LogPanel
@@ -609,6 +623,8 @@ onUnmounted(() => {
         v-if="terminalReady"
         v-show="showTerminal"
         :repo-path="repoPath"
+        :start-cwd="termStartCwd || repoPath"
+        :spawn-seq="termSpawnSeq"
         :visible="showTerminal && active"
         @close="showTerminal = false"
       />

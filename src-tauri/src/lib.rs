@@ -389,6 +389,28 @@ async fn list_worktree(state: State<'_, AppState>, repo: Option<String>) -> Resu
 }
 
 #[tauri::command]
+async fn abs_worktree_path(
+    state: State<'_, AppState>,
+    path: String,
+    repo: Option<String>,
+) -> Result<String, String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::abs_worktree_path(&repo, &path)).await
+}
+
+#[tauri::command]
+async fn reveal_in_os(state: State<'_, AppState>, path: String, repo: Option<String>) -> Result<(), String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::reveal_in_os(&repo, &path)).await
+}
+
+#[tauri::command]
+async fn open_in_os(state: State<'_, AppState>, path: String, repo: Option<String>) -> Result<(), String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::open_in_os(&repo, &path)).await
+}
+
+#[tauri::command]
 async fn preview_file(
     state: State<'_, AppState>,
     path: String,
@@ -609,6 +631,9 @@ pub fn run() {
             format_patch,
             write_text_file,
             list_worktree,
+            abs_worktree_path,
+            reveal_in_os,
+            open_in_os,
             preview_file,
             save_worktree_file,
             drop_commit,

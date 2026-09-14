@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import "highlight.js/styles/atom-one-dark.css";
-import { listWorktree, previewFile, saveWorktreeFile } from "../api";
+import { absWorktreePath, listWorktree, openInOs, previewFile, revealInOs, saveWorktreeFile } from "../api";
 import { languageFromPath } from "../highlight";
 import { notify } from "../notify";
 import type { FilePreview } from "../types";
@@ -21,6 +21,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   close: [];
   changed: [];
+  openTerminal: [cwd: string];
 }>();
 
 const query = ref("");
@@ -35,6 +36,22 @@ const savedContent = ref("");
 const loadingPreview = ref(false);
 const saving = ref(false);
 const previewError = ref("");
+const menu = ref<{
+  open: boolean;
+  x: number;
+  y: number;
+  node: TreeNode | null;
+  sub: boolean;
+  subLeft: boolean;
+}>({
+  open: false,
+  x: 0,
+  y: 0,
+  node: null,
+  sub: false,
+  subLeft: false,
+});
+const pathWindow = ref("");
 
 const visible = computed(() => flatten(tree.value, query.value.trim().toLowerCase(), expanded.value));
 const lineCount = computed(() => (draft.value ? draft.value.split("\n").length : 0));
@@ -159,15 +176,110 @@ async function saveFile() {
   }
 }
 
+function absPath(node: TreeNode) {
+  const base = props.repoPath.replace(/[\\/]+$/, "");
+  return `${base}\\${node.path.replace(/\//g, "\\")}`;
+}
+
+function closeMenu() {
+  menu.value.open = false;
+  menu.value.sub = false;
+}
+
+function openMenu(event: MouseEvent, node: TreeNode) {
+  event.preventDefault();
+  event.stopPropagation();
+  selected.value = node.path;
+  const width = 228;
+  const height = node.dir ? 76 : 104;
+  const x = Math.min(event.clientX, window.innerWidth - width - 8);
+  const y = Math.min(event.clientY, window.innerHeight - height - 8);
+  menu.value = {
+    open: true,
+    x: Math.max(8, x),
+    y: Math.max(8, y),
+    node,
+    sub: false,
+    subLeft: event.clientX > window.innerWidth - 460,
+  };
+}
+
 function onRow(node: TreeNode) {
+  closeMenu();
   if (node.dir) toggleDir(node.path);
   else void openFile(node.path);
+}
+
+async function copyPath() {
+  const node = menu.value.node;
+  closeMenu();
+  if (!node) return;
+  const text = await absWorktreePath(props.repoPath, node.path).catch(() => absPath(node));
+  await navigator.clipboard.writeText(text).catch(() => undefined);
+  notify("已复制路径");
+}
+
+async function revealInExplorer() {
+  const node = menu.value.node;
+  closeMenu();
+  if (!node) return;
+  try {
+    await revealInOs(props.repoPath, node.path);
+  } catch (error) {
+    notify(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
+async function openWithApp() {
+  const node = menu.value.node;
+  closeMenu();
+  if (!node) return;
+  try {
+    await openInOs(props.repoPath, node.path);
+  } catch (error) {
+    notify(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
+async function copyShownPath() {
+  if (!pathWindow.value) return;
+  await navigator.clipboard.writeText(pathWindow.value).catch(() => undefined);
+  notify("已复制路径");
+}
+
+async function showPathWindow(node?: TreeNode | null) {
+  const target = node ?? menu.value.node;
+  closeMenu();
+  if (!target) return;
+  pathWindow.value = await absWorktreePath(props.repoPath, target.path).catch(() => absPath(target));
+}
+
+async function openInTerminal() {
+  const node = menu.value.node;
+  closeMenu();
+  if (!node) return;
+  const abs = await absWorktreePath(props.repoPath, node.path).catch(() => absPath(node));
+  const normalized = abs.replace(/^\\\\\?\\/, "").replace(/\//g, "\\");
+  const cwd = node.dir ? normalized : normalized.slice(0, Math.max(normalized.lastIndexOf("\\"), 0));
+  emit("openTerminal", cwd || props.repoPath);
 }
 
 function onEditorKey(event: KeyboardEvent) {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
     event.preventDefault();
     void saveFile();
+  }
+}
+
+function onGlobalKey(event: KeyboardEvent) {
+  if (event.ctrlKey && event.altKey && (event.code === "F12" || event.key === "F12")) {
+    const name = selected.value;
+    if (!name) return;
+    const node = visible.value.find((item) => item.node.path === name)?.node;
+    if (!node) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void showPathWindow(node);
   }
 }
 
@@ -179,7 +291,12 @@ function requestClose() {
 }
 
 onMounted(() => {
+  window.addEventListener("keydown", onGlobalKey, true);
   void loadTree();
+});
+
+onUnmounted(() => {
+  window.removeEventListener("keydown", onGlobalKey, true);
 });
 
 watch(
@@ -221,6 +338,7 @@ watch(
             :style="{ paddingLeft: `${10 + depth * 14}px` }"
             :title="node.path"
             @click="onRow(node)"
+            @contextmenu="openMenu($event, node)"
           >
             <span class="twist" :class="{ open: node.dir && (query || expanded.has(node.path)), hidden: !node.dir }">
               <Icons name="chevron" :size="10" />
@@ -274,6 +392,44 @@ watch(
         </div>
       </article>
     </section>
+
+    <Teleport to="body">
+      <div v-if="menu.open" class="ctx-mask" @mousedown="closeMenu">
+        <div class="popup-menu ctx" :style="{ top: `${menu.y}px`, left: `${menu.x}px` }" @mousedown.stop>
+          <button v-if="menu.node && !menu.node.dir" type="button" @click="closeMenu(); openFile(menu.node.path)">
+            在预览中打开
+          </button>
+          <button type="button" @click="copyPath">复制路径</button>
+          <div class="divider" />
+          <div class="sub-wrap" @mouseenter="menu.sub = true">
+            <button type="button" class="sub-btn" :class="{ open: menu.sub }" @click.stop="menu.sub = !menu.sub">
+              <span>打开于</span>
+              <span class="arrow">›</span>
+            </button>
+            <div v-show="menu.sub" class="submenu" :class="{ left: menu.subLeft }">
+              <button type="button" @click="revealInExplorer">资源管理器</button>
+              <button type="button" @click="openWithApp">在关联的应用程序中打开</button>
+              <button type="button" class="with-key" @click="showPathWindow()">
+                <span>路径窗口</span>
+                <span class="key">Ctrl+Alt+F12</span>
+              </button>
+              <button type="button" @click="openInTerminal">终端</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="pathWindow" class="ctx-mask" @mousedown="pathWindow = ''">
+        <div class="path-box" @mousedown.stop>
+          <header>路径</header>
+          <input :value="pathWindow" readonly @focus="($event.target as HTMLInputElement).select()" />
+          <div class="path-actions">
+            <button type="button" class="secondary-btn" @click="pathWindow = ''">关闭</button>
+            <button type="button" class="primary-btn" @click="copyShownPath">复制</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -440,5 +596,100 @@ header {
 
 .editor[readonly] {
   color: #9aa3ad;
+}
+
+.ctx-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+}
+
+.ctx {
+  position: fixed;
+  min-width: 220px;
+  overflow: visible;
+  z-index: 1301;
+}
+
+.sub-wrap {
+  position: relative;
+}
+
+.sub-btn {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sub-btn.open,
+.sub-btn:hover {
+  background: var(--bg-selected);
+}
+
+.arrow,
+.key {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.with-key {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.submenu {
+  position: absolute;
+  top: -5px;
+  left: calc(100% - 4px);
+  min-width: 248px;
+  z-index: 1302;
+  background: #3c3f41;
+  border: 1px solid #54575b;
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+  padding: 4px 0;
+}
+
+.submenu.left {
+  left: auto;
+  right: calc(100% - 4px);
+}
+
+.path-box {
+  position: fixed;
+  left: 50%;
+  top: 20%;
+  transform: translateX(-50%);
+  width: min(640px, calc(100vw - 32px));
+  padding: 10px 12px 12px;
+  background: #3c3f41;
+  border: 1px solid #54575b;
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+}
+
+.path-box header {
+  border: 0;
+  padding: 0 0 8px;
+  font-weight: 600;
+}
+
+.path-box input {
+  width: 100%;
+  height: 30px;
+  border: 1px solid var(--border-soft);
+  background: var(--bg-input);
+  border-radius: 4px;
+  padding: 0 8px;
+  color: var(--text);
+}
+
+.path-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
 }
 </style>

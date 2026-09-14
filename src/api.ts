@@ -272,6 +272,18 @@ export function listWorktree(repo?: string) {
   return invoke<string[]>("list_worktree", withRepo(repo));
 }
 
+export function absWorktreePath(repo: string | undefined, path: string) {
+  return invoke<string>("abs_worktree_path", withRepo(repo, { path }));
+}
+
+export function revealInOs(repo: string | undefined, path: string) {
+  return invoke<void>("reveal_in_os", withRepo(repo, { path }));
+}
+
+export function openInOs(repo: string | undefined, path: string) {
+  return invoke<void>("open_in_os", withRepo(repo, { path }));
+}
+
 export function previewFile(repo: string | undefined, path: string) {
   return invoke<FilePreview>("preview_file", withRepo(repo, { path }));
 }
