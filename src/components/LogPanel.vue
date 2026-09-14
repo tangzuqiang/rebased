@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, nextTick, ref } from "vue";
 import { save } from "@tauri-apps/plugin-dialog";
 import {
   checkoutRevision,
@@ -129,6 +129,7 @@ async function copyHash() {
 async function runAction(label: string, task: () => Promise<string | void>) {
   acting.value = true;
   actionError.value = "";
+  await nextTick();
   try {
     const message = await task();
     closeMenu();

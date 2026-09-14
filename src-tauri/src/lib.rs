@@ -10,407 +10,493 @@ use git::{
 };
 use std::path::PathBuf;
 use store::{AppStore, RecentProject, SessionState};
+use tauri::async_runtime::spawn_blocking;
 use tauri::{AppHandle, Manager, State};
 
 fn repo_dir(state: &AppState, repo: Option<String>) -> Result<PathBuf, String> {
     state.resolve_repo(repo.as_deref())
 }
 
-#[tauri::command]
-fn open_repo(state: State<AppState>, path: String) -> Result<RepoInfo, String> {
-    git::open_repo(&state, &path)
+async fn run_blocking<T, F>(task: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    spawn_blocking(task)
+        .await
+        .map_err(|error| format!("后台任务失败：{error}"))?
 }
 
 #[tauri::command]
-fn get_repo(state: State<AppState>, repo: Option<String>) -> Result<RepoInfo, String> {
-    git::repo_info(&repo_dir(&state, repo)?)
+async fn open_repo(state: State<'_, AppState>, path: String) -> Result<RepoInfo, String> {
+    let (repo, info) = run_blocking(move || git::discover_repo(&path)).await?;
+    state.set_repo(repo)?;
+    Ok(info)
 }
 
 #[tauri::command]
-fn get_status(state: State<AppState>, repo: Option<String>) -> Result<StatusPayload, String> {
-    git::status(&repo_dir(&state, repo)?)
+async fn get_repo(state: State<'_, AppState>, repo: Option<String>) -> Result<RepoInfo, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::repo_info(&path)).await
 }
 
 #[tauri::command]
-fn get_log(
-    state: State<AppState>,
+async fn get_status(state: State<'_, AppState>, repo: Option<String>) -> Result<StatusPayload, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::status(&path)).await
+}
+
+#[tauri::command]
+async fn get_log(
+    state: State<'_, AppState>,
     limit: Option<u32>,
     repo: Option<String>,
     refs: Option<Vec<String>>,
 ) -> Result<Vec<GitCommit>, String> {
-    git::log(
-        &repo_dir(&state, repo)?,
-        limit.unwrap_or(200),
-        &refs.unwrap_or_default(),
-    )
+    let path = repo_dir(&state, repo)?;
+    let refs = refs.unwrap_or_default();
+    let limit = limit.unwrap_or(200);
+    run_blocking(move || git::log(&path, limit, &refs)).await
 }
 
 #[tauri::command]
-fn get_commit_files(state: State<AppState>, hash: String, repo: Option<String>) -> Result<Vec<GitFile>, String> {
-    git::commit_files(&repo_dir(&state, repo)?, &hash)
+async fn get_commit_files(
+    state: State<'_, AppState>,
+    hash: String,
+    repo: Option<String>,
+) -> Result<Vec<GitFile>, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::commit_files(&path, &hash)).await
 }
 
 #[tauri::command]
-fn get_branches(state: State<AppState>, repo: Option<String>) -> Result<Vec<BranchInfo>, String> {
-    git::branches(&repo_dir(&state, repo)?)
+async fn get_branches(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<BranchInfo>, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::branches(&path)).await
 }
 
 #[tauri::command]
-fn get_recent_branches(
-    state: State<AppState>,
+async fn get_recent_branches(
+    state: State<'_, AppState>,
     limit: Option<u32>,
     repo: Option<String>,
 ) -> Result<Vec<String>, String> {
-    git::recent_branches(&repo_dir(&state, repo)?, limit.unwrap_or(4) as usize)
+    let path = repo_dir(&state, repo)?;
+    let limit = limit.unwrap_or(4) as usize;
+    run_blocking(move || git::recent_branches(&path, limit)).await
 }
 
 #[tauri::command]
-fn stage_file(state: State<AppState>, path: String, repo: Option<String>) -> Result<(), String> {
-    git::stage(&repo_dir(&state, repo)?, &path)
+async fn stage_file(state: State<'_, AppState>, path: String, repo: Option<String>) -> Result<(), String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::stage(&repo, &path)).await
 }
 
 #[tauri::command]
-fn unstage_file(state: State<AppState>, path: String, repo: Option<String>) -> Result<(), String> {
-    git::unstage(&repo_dir(&state, repo)?, &path)
+async fn unstage_file(state: State<'_, AppState>, path: String, repo: Option<String>) -> Result<(), String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::unstage(&repo, &path)).await
 }
 
 #[tauri::command]
-fn commit_changes(
-    state: State<AppState>,
+async fn commit_changes(
+    state: State<'_, AppState>,
     message: String,
     amend: bool,
     paths: Vec<String>,
     repo: Option<String>,
 ) -> Result<(), String> {
-    git::commit(&repo_dir(&state, repo)?, &message, amend, &paths)
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::commit(&repo, &message, amend, &paths)).await
 }
 
 #[tauri::command]
-fn checkout_branch(state: State<AppState>, name: String, repo: Option<String>) -> Result<(), String> {
-    git::checkout(&repo_dir(&state, repo)?, &name)
+async fn checkout_branch(state: State<'_, AppState>, name: String, repo: Option<String>) -> Result<(), String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::checkout(&path, &name)).await
 }
 
 #[tauri::command]
-fn fetch_remote(state: State<AppState>, repo: Option<String>) -> Result<String, String> {
-    git::fetch(&repo_dir(&state, repo)?)
+async fn fetch_remote(state: State<'_, AppState>, repo: Option<String>) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::fetch(&path)).await
 }
 
 #[tauri::command]
-fn pull_remote(state: State<AppState>, repo: Option<String>) -> Result<String, String> {
-    git::pull(&repo_dir(&state, repo)?)
+async fn pull_remote(state: State<'_, AppState>, repo: Option<String>) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::pull(&path)).await
 }
 
 #[tauri::command]
-fn push_remote(state: State<AppState>, repo: Option<String>) -> Result<String, String> {
-    git::push(&repo_dir(&state, repo)?)
+async fn push_remote(state: State<'_, AppState>, repo: Option<String>) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::push(&path)).await
 }
 
 #[tauri::command]
-fn get_remotes(state: State<AppState>, repo: Option<String>) -> Result<Vec<String>, String> {
-    git::remotes(&repo_dir(&state, repo)?)
+async fn get_remotes(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<String>, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::remotes(&path)).await
 }
 
 #[tauri::command]
-fn push_to(
-    state: State<AppState>,
+async fn push_to(
+    state: State<'_, AppState>,
     remote: String,
     branch: String,
     repo: Option<String>,
 ) -> Result<String, String> {
-    git::push_to(&repo_dir(&state, repo)?, &remote, &branch)
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::push_to(&path, &remote, &branch)).await
 }
 
 #[tauri::command]
-fn get_merge_preview(
-    state: State<AppState>,
+async fn get_merge_preview(
+    state: State<'_, AppState>,
     theirs: String,
     repo: Option<String>,
 ) -> Result<MergePreview, String> {
-    git::merge_preview(&repo_dir(&state, repo)?, &theirs)
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::merge_preview(&path, &theirs)).await
 }
 
 #[tauri::command]
-fn get_merge_file(
-    state: State<AppState>,
+async fn get_merge_file(
+    state: State<'_, AppState>,
     theirs: String,
     path: String,
     repo: Option<String>,
 ) -> Result<MergeFileContent, String> {
-    git::merge_file(&repo_dir(&state, repo)?, &theirs, &path)
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::merge_file(&repo, &theirs, &path)).await
 }
 
 #[tauri::command]
-fn merge_branch(state: State<AppState>, theirs: String, repo: Option<String>) -> Result<MergeOutcome, String> {
-    git::merge_branch(&repo_dir(&state, repo)?, &theirs)
+async fn merge_branch(
+    state: State<'_, AppState>,
+    theirs: String,
+    repo: Option<String>,
+) -> Result<MergeOutcome, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::merge_branch(&path, &theirs)).await
 }
 
 #[tauri::command]
-fn merge_abort(state: State<AppState>, repo: Option<String>) -> Result<String, String> {
-    git::merge_abort(&repo_dir(&state, repo)?)
+async fn merge_abort(state: State<'_, AppState>, repo: Option<String>) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::merge_abort(&path)).await
 }
 
 #[tauri::command]
-fn get_merge_state(state: State<AppState>, repo: Option<String>) -> Result<MergeState, String> {
-    git::merge_state(&repo_dir(&state, repo)?)
+async fn get_merge_state(state: State<'_, AppState>, repo: Option<String>) -> Result<MergeState, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::merge_state(&path)).await
 }
 
 #[tauri::command]
-fn merge_continue(state: State<AppState>, repo: Option<String>) -> Result<String, String> {
-    git::merge_continue(&repo_dir(&state, repo)?)
+async fn merge_continue(state: State<'_, AppState>, repo: Option<String>) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::merge_continue(&path)).await
 }
 
 #[tauri::command]
-fn resolve_conflict(
-    state: State<AppState>,
+async fn resolve_conflict(
+    state: State<'_, AppState>,
     path: String,
     side: String,
     repo: Option<String>,
 ) -> Result<MergeState, String> {
-    git::resolve_conflict(&repo_dir(&state, repo)?, &path, &side)
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::resolve_conflict(&repo, &path, &side)).await
 }
 
 #[tauri::command]
-fn write_resolved(
-    state: State<AppState>,
+async fn write_resolved(
+    state: State<'_, AppState>,
     path: String,
     content: String,
     repo: Option<String>,
 ) -> Result<MergeState, String> {
-    git::write_resolved(&repo_dir(&state, repo)?, &path, &content)
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::write_resolved(&repo, &path, &content)).await
 }
 
 #[tauri::command]
-fn get_conflict_file(
-    state: State<AppState>,
+async fn get_conflict_file(
+    state: State<'_, AppState>,
     path: String,
     repo: Option<String>,
 ) -> Result<MergeFileContent, String> {
-    git::conflict_file(&repo_dir(&state, repo)?, &path)
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::conflict_file(&repo, &path)).await
 }
 
 #[tauri::command]
-fn get_working_diff(
-    state: State<AppState>,
+async fn get_working_diff(
+    state: State<'_, AppState>,
     path: String,
     untracked: bool,
     repo: Option<String>,
 ) -> Result<FileDiff, String> {
-    git::working_diff(&repo_dir(&state, repo)?, &path, untracked)
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::working_diff(&repo, &path, untracked)).await
 }
 
 #[tauri::command]
-fn generate_commit_message(
-    state: State<AppState>,
-    store: State<AppStore>,
+async fn generate_commit_message(
+    app: AppHandle,
+    state: State<'_, AppState>,
     paths: Vec<ai::DiffPath>,
     repo: Option<String>,
 ) -> Result<ai::GeneratedMessage, String> {
-    ai::generate_commit_message(&state, &store, &paths, repo.as_deref())
+    let repo = Some(repo_dir(&state, repo)?.to_string_lossy().into_owned());
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let store = app.state::<AppStore>();
+        ai::generate_commit_message(&state, &store, &paths, repo.as_deref())
+    })
+    .await
 }
 
 #[tauri::command]
-fn get_ai_config(store: State<AppStore>) -> ai::AiConfig {
-    ai::get_ai_config(&store)
+async fn get_ai_config(app: AppHandle) -> Result<ai::AiConfig, String> {
+    run_blocking(move || Ok(ai::get_ai_config(&app.state::<AppStore>()))).await
 }
 
 #[tauri::command]
-fn save_ai_config(store: State<AppStore>, config: ai::AiConfig) -> Result<ai::AiConfig, String> {
-    ai::save_ai_config(&store, config)
+async fn save_ai_config(app: AppHandle, config: ai::AiConfig) -> Result<ai::AiConfig, String> {
+    run_blocking(move || ai::save_ai_config(&app.state::<AppStore>(), config)).await
 }
 
 #[tauri::command]
-fn test_ai_config(store: State<AppStore>) -> Result<String, String> {
-    ai::test_ai_config(&store)
+async fn test_ai_config(app: AppHandle) -> Result<String, String> {
+    run_blocking(move || ai::test_ai_config(&app.state::<AppStore>())).await
 }
 
 #[tauri::command]
-fn get_recent_projects(store: State<AppStore>) -> Result<Vec<RecentProject>, String> {
-    store.recent_projects()
+async fn get_recent_projects(app: AppHandle) -> Result<Vec<RecentProject>, String> {
+    run_blocking(move || app.state::<AppStore>().recent_projects()).await
 }
 
 #[tauri::command]
-fn record_recent_project(
-    store: State<AppStore>,
-    path: String,
-    name: String,
-) -> Result<Vec<RecentProject>, String> {
-    store.touch_recent(&path, &name)
+async fn record_recent_project(app: AppHandle, path: String, name: String) -> Result<Vec<RecentProject>, String> {
+    run_blocking(move || app.state::<AppStore>().touch_recent(&path, &name)).await
 }
 
 #[tauri::command]
-fn remove_recent_project(store: State<AppStore>, path: String) -> Result<Vec<RecentProject>, String> {
-    store.remove_recent(&path)
+async fn remove_recent_project(app: AppHandle, path: String) -> Result<Vec<RecentProject>, String> {
+    run_blocking(move || app.state::<AppStore>().remove_recent(&path)).await
 }
 
 #[tauri::command]
-fn get_session(store: State<AppStore>) -> Result<SessionState, String> {
-    store.get_session()
+async fn get_session(app: AppHandle) -> Result<SessionState, String> {
+    run_blocking(move || app.state::<AppStore>().get_session()).await
 }
 
 #[tauri::command]
-fn save_session(store: State<AppStore>, session: SessionState) -> Result<SessionState, String> {
-    store.save_session(session)
+async fn save_session(app: AppHandle, session: SessionState) -> Result<SessionState, String> {
+    run_blocking(move || app.state::<AppStore>().save_session(session)).await
 }
 
 #[tauri::command]
-fn get_app_setting(store: State<AppStore>, key: String) -> Result<Option<String>, String> {
-    store.get_setting(&key)
+async fn get_app_setting(app: AppHandle, key: String) -> Result<Option<String>, String> {
+    run_blocking(move || app.state::<AppStore>().get_setting(&key)).await
 }
 
 #[tauri::command]
-fn set_app_setting(store: State<AppStore>, key: String, value: String) -> Result<(), String> {
-    store.set_setting(&key, &value)
+async fn set_app_setting(app: AppHandle, key: String, value: String) -> Result<(), String> {
+    run_blocking(move || app.state::<AppStore>().set_setting(&key, &value)).await
 }
 
 #[tauri::command]
-fn cherry_pick(state: State<AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
-    git::cherry_pick(&repo_dir(&state, repo)?, &hash)
+async fn cherry_pick(state: State<'_, AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::cherry_pick(&path, &hash)).await
 }
 
 #[tauri::command]
-fn checkout_revision(state: State<AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
-    git::checkout_revision(&repo_dir(&state, repo)?, &hash)
+async fn checkout_revision(
+    state: State<'_, AppState>,
+    hash: String,
+    repo: Option<String>,
+) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::checkout_revision(&path, &hash)).await
 }
 
 #[tauri::command]
-fn reset_to(
-    state: State<AppState>,
+async fn reset_to(
+    state: State<'_, AppState>,
     hash: String,
     mode: String,
     repo: Option<String>,
 ) -> Result<String, String> {
-    git::reset_to(&repo_dir(&state, repo)?, &hash, &mode)
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::reset_to(&path, &hash, &mode)).await
 }
 
 #[tauri::command]
-fn revert_commit(state: State<AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
-    git::revert_commit(&repo_dir(&state, repo)?, &hash)
+async fn revert_commit(state: State<'_, AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::revert_commit(&path, &hash)).await
 }
 
 #[tauri::command]
-fn undo_commit(state: State<AppState>, repo: Option<String>) -> Result<String, String> {
-    git::undo_commit(&repo_dir(&state, repo)?)
+async fn undo_commit(state: State<'_, AppState>, repo: Option<String>) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::undo_commit(&path)).await
 }
 
 #[tauri::command]
-fn create_branch_at(
-    state: State<AppState>,
+async fn create_branch_at(
+    state: State<'_, AppState>,
     name: String,
     hash: String,
     checkout: bool,
     repo: Option<String>,
 ) -> Result<String, String> {
-    git::create_branch_at(&repo_dir(&state, repo)?, &name, &hash, checkout)
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::create_branch_at(&path, &name, &hash, checkout)).await
 }
 
 #[tauri::command]
-fn create_tag_at(
-    state: State<AppState>,
+async fn create_tag_at(
+    state: State<'_, AppState>,
     name: String,
     hash: String,
     repo: Option<String>,
 ) -> Result<String, String> {
-    git::create_tag_at(&repo_dir(&state, repo)?, &name, &hash)
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::create_tag_at(&path, &name, &hash)).await
 }
 
 #[tauri::command]
-fn format_patch(state: State<AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
-    git::format_patch(&repo_dir(&state, repo)?, &hash)
+async fn format_patch(state: State<'_, AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::format_patch(&path, &hash)).await
 }
 
 #[tauri::command]
-fn write_text_file(path: String, content: String) -> Result<(), String> {
-    git::write_text_file(&path, &content)
+async fn write_text_file(path: String, content: String) -> Result<(), String> {
+    run_blocking(move || git::write_text_file(&path, &content)).await
 }
 
 #[tauri::command]
-fn list_worktree(state: State<AppState>, repo: Option<String>) -> Result<Vec<String>, String> {
-    git::list_worktree(&repo_dir(&state, repo)?)
+async fn list_worktree(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<String>, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::list_worktree(&path)).await
 }
 
 #[tauri::command]
-fn preview_file(
-    state: State<AppState>,
+async fn preview_file(
+    state: State<'_, AppState>,
     path: String,
     repo: Option<String>,
 ) -> Result<FilePreview, String> {
-    git::preview_file(&repo_dir(&state, repo)?, &path)
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::preview_file(&repo, &path)).await
 }
 
 #[tauri::command]
-fn drop_commit(state: State<AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
-    git::drop_commit(&repo_dir(&state, repo)?, &hash)
+async fn save_worktree_file(
+    state: State<'_, AppState>,
+    path: String,
+    content: String,
+    repo: Option<String>,
+) -> Result<FilePreview, String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::save_worktree_file(&repo, &path, &content)).await
 }
 
 #[tauri::command]
-fn push_upto(
-    state: State<AppState>,
+async fn drop_commit(state: State<'_, AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::drop_commit(&path, &hash)).await
+}
+
+#[tauri::command]
+async fn push_upto(
+    state: State<'_, AppState>,
     remote: String,
     branch: String,
     hash: String,
     repo: Option<String>,
 ) -> Result<String, String> {
-    git::push_upto(&repo_dir(&state, repo)?, &remote, &branch, &hash)
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::push_upto(&path, &remote, &branch, &hash)).await
 }
 
 #[tauri::command]
-fn commit_diff(
-    state: State<AppState>,
+async fn commit_diff(
+    state: State<'_, AppState>,
     from: String,
     to: String,
     repo: Option<String>,
 ) -> Result<FileDiff, String> {
-    git::commit_diff(&repo_dir(&state, repo)?, &from, &to)
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::commit_diff(&path, &from, &to)).await
 }
 
 #[tauri::command]
-fn fixup_commit(state: State<AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
-    git::fixup_commit(&repo_dir(&state, repo)?, &hash)
+async fn fixup_commit(state: State<'_, AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::fixup_commit(&path, &hash)).await
 }
 
 #[tauri::command]
-fn squash_commit(state: State<AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
-    git::squash_commit(&repo_dir(&state, repo)?, &hash)
+async fn squash_commit(state: State<'_, AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::squash_commit(&path, &hash)).await
 }
 
 #[tauri::command]
-fn rebase_plan(
-    state: State<AppState>,
+async fn rebase_plan(
+    state: State<'_, AppState>,
     upstream: String,
     items: Vec<git::RebaseItem>,
     repo: Option<String>,
 ) -> Result<String, String> {
-    git::rebase_plan(&repo_dir(&state, repo)?, &upstream, &items)
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::rebase_plan(&path, &upstream, &items)).await
 }
 
 #[tauri::command]
-fn rename_branch(
-    state: State<AppState>,
+async fn rename_branch(
+    state: State<'_, AppState>,
     old: String,
     new: String,
     repo: Option<String>,
 ) -> Result<String, String> {
-    git::rename_branch(&repo_dir(&state, repo)?, &old, &new)
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::rename_branch(&path, &old, &new)).await
 }
 
 #[tauri::command]
-fn set_upstream(
-    state: State<AppState>,
+async fn set_upstream(
+    state: State<'_, AppState>,
     local: String,
     upstream: String,
     repo: Option<String>,
 ) -> Result<String, String> {
-    git::set_upstream(&repo_dir(&state, repo)?, &local, &upstream)
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::set_upstream(&path, &local, &upstream)).await
 }
 
 #[tauri::command]
-fn update_branch(state: State<AppState>, name: String, repo: Option<String>) -> Result<String, String> {
-    git::update_branch(&repo_dir(&state, repo)?, &name)
+async fn update_branch(state: State<'_, AppState>, name: String, repo: Option<String>) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::update_branch(&path, &name)).await
 }
 
 #[tauri::command]
-fn working_tree_diff(state: State<AppState>, rev: String, repo: Option<String>) -> Result<FileDiff, String> {
-    git::working_tree_diff(&repo_dir(&state, repo)?, &rev)
+async fn working_tree_diff(
+    state: State<'_, AppState>,
+    rev: String,
+    repo: Option<String>,
+) -> Result<FileDiff, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::working_tree_diff(&path, &rev)).await
 }
 
 #[tauri::command]
@@ -446,13 +532,13 @@ fn close_terminal(hub: State<term::TerminalHub>, id: String) -> Result<(), Strin
 }
 
 #[tauri::command]
-fn check_update() -> Result<updater::UpdateInfo, String> {
-    updater::check_update()
+async fn check_update() -> Result<updater::UpdateInfo, String> {
+    run_blocking(updater::check_update).await
 }
 
 #[tauri::command]
-fn install_update(app: AppHandle) -> Result<String, String> {
-    updater::install_update(app)
+async fn install_update(app: AppHandle) -> Result<String, String> {
+    run_blocking(move || updater::install_update(app)).await
 }
 
 #[tauri::command]
@@ -524,6 +610,7 @@ pub fn run() {
             write_text_file,
             list_worktree,
             preview_file,
+            save_worktree_file,
             drop_commit,
             push_upto,
             commit_diff,

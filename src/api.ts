@@ -276,6 +276,10 @@ export function previewFile(repo: string | undefined, path: string) {
   return invoke<FilePreview>("preview_file", withRepo(repo, { path }));
 }
 
+export function saveWorktreeFile(repo: string | undefined, path: string, content: string) {
+  return invoke<FilePreview>("save_worktree_file", withRepo(repo, { path, content }));
+}
+
 export function startTerminal(id: string, cwd: string, cols: number, rows: number) {
   return invoke<void>("start_terminal", { id, cwd, cols, rows });
 }

@@ -14,6 +14,7 @@ const props = defineProps<{
   merging?: boolean;
   recent?: RecentProject[];
   filesOpen?: boolean;
+  terminalOpen?: boolean;
   busyText?: string;
   recentBranches?: string[];
   version?: string;
@@ -30,6 +31,7 @@ const emit = defineEmits<{
   conflicts: [];
   settings: [];
   files: [];
+  terminal: [];
   newBranch: [];
   branchAction: [payload: { action: BranchMenuAction; branch: BranchInfo }];
 }>();
@@ -75,10 +77,19 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branc
         type="button"
         class="icon-btn"
         :class="{ active: filesOpen }"
-        title="文件预览"
+        title="项目"
         @click="emit('files')"
       >
         <Icons name="folder" />
+      </button>
+      <button
+        type="button"
+        class="icon-btn"
+        :class="{ active: terminalOpen }"
+        title="终端 (Alt+F12)"
+        @click="emit('terminal')"
+      >
+        <Icons name="terminal" />
       </button>
       <img src="/rebased.svg" width="18" height="18" alt="" />
       <span v-if="version" class="app-ver" :title="`Rebased ${version}`">{{ version }}</span>

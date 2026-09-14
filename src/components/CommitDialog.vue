@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { generateCommitMessage, getWorkingDiff } from "../api";
 import { parsePatch } from "../patch";
 import type { DiffLine, GitFile, RepoInfo } from "../types";
@@ -119,6 +119,7 @@ async function generateAi() {
   }
   generating.value = true;
   generateHint.value = "正在生成提交信息…";
+  await nextTick();
   try {
     const known = new Map(allFiles.value.map((file) => [file.path, file.untracked]));
     const result = await generateCommitMessage(

@@ -29,6 +29,12 @@ impl AppState {
             _ => self.repo_path(),
         }
     }
+
+    pub fn set_repo(&self, repo: PathBuf) -> Result<(), String> {
+        let mut guard = self.repo.lock().map_err(|_| "状态锁失败".to_string())?;
+        *guard = Some(repo);
+        Ok(())
+    }
 }
 
 #[derive(Serialize)]
@@ -202,7 +208,7 @@ fn repo_name(path: &Path) -> String {
         .to_string()
 }
 
-pub fn open_repo(state: &AppState, path: &str) -> Result<RepoInfo, String> {
+pub fn discover_repo(path: &str) -> Result<(PathBuf, RepoInfo), String> {
     let input = PathBuf::from(path);
     if !input.exists() {
         return Err(format!("路径不存在：{path}"));
@@ -216,11 +222,14 @@ pub fn open_repo(state: &AppState, path: &str) -> Result<RepoInfo, String> {
     }
 
     let repo = PathBuf::from(&toplevel);
-    {
-        let mut guard = state.repo.lock().map_err(|_| "状态锁失败".to_string())?;
-        *guard = Some(repo.clone());
-    }
-    repo_info(&repo)
+    let info = repo_info(&repo)?;
+    Ok((repo, info))
+}
+
+pub fn open_repo(state: &AppState, path: &str) -> Result<RepoInfo, String> {
+    let (repo, info) = discover_repo(path)?;
+    state.set_repo(repo)?;
+    Ok(info)
 }
 
 pub fn repo_info(repo: &Path) -> Result<RepoInfo, String> {
@@ -1299,19 +1308,7 @@ pub struct FilePreview {
 
 const PREVIEW_LIMIT: usize = 512 * 1024;
 
-pub fn list_worktree(repo: &Path) -> Result<Vec<String>, String> {
-    let raw = run_git(repo, &["ls-files", "-co", "--exclude-standard", "-z"])?;
-    let mut files: Vec<String> = raw
-        .split('\0')
-        .map(|item| item.trim().replace('\\', "/"))
-        .filter(|item| !item.is_empty())
-        .collect();
-    files.sort();
-    files.dedup();
-    Ok(files)
-}
-
-pub fn preview_file(repo: &Path, rel: &str) -> Result<FilePreview, String> {
+fn resolve_worktree_file(repo: &Path, rel: &str) -> Result<(String, PathBuf), String> {
     let rel = rel.replace('\\', "/");
     if rel.is_empty() || rel.contains("..") || Path::new(&rel).is_absolute() {
         return Err("无效的文件路径".to_string());
@@ -1324,6 +1321,33 @@ pub fn preview_file(repo: &Path, rel: &str) -> Result<FilePreview, String> {
     if !canonical.starts_with(&repo_root) {
         return Err("文件不在仓库内".to_string());
     }
+    Ok((rel, canonical))
+}
+
+pub fn list_worktree(repo: &Path) -> Result<Vec<String>, String> {
+    let raw = run_git(repo, &["ls-files", "-co", "--exclude-standard", "-z"])?;
+    let mut files: Vec<String> = raw
+        .split('\0')
+        .map(|item| item.trim().replace('\\', "/"))
+        .filter(|item| !item.is_empty())
+        .collect();
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+pub fn save_worktree_file(repo: &Path, rel: &str, content: &str) -> Result<FilePreview, String> {
+    let (rel, canonical) = resolve_worktree_file(repo, rel)?;
+    let meta = std::fs::metadata(&canonical).map_err(|e| format!("无法读取文件：{e}"))?;
+    if meta.is_dir() {
+        return Err("这是一个目录".to_string());
+    }
+    std::fs::write(&canonical, content).map_err(|e| format!("写入文件失败：{e}"))?;
+    preview_file(repo, &rel)
+}
+
+pub fn preview_file(repo: &Path, rel: &str) -> Result<FilePreview, String> {
+    let (rel, canonical) = resolve_worktree_file(repo, rel)?;
     let meta = std::fs::metadata(&canonical).map_err(|e| format!("无法读取文件：{e}"))?;
     if meta.is_dir() {
         return Err("这是一个目录".to_string());

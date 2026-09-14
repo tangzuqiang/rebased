@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   checkoutBranch,
   commitChanges,
@@ -105,6 +105,8 @@ async function withBusy<T>(label: string, task: () => Promise<T>): Promise<T | u
   busy.value = true;
   statusText.value = label;
   errorText.value = "";
+  await nextTick();
+  await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
   try {
     const result = await task();
     statusText.value = "就绪";
@@ -200,6 +202,15 @@ async function bootstrap(openConflicts = false) {
   }
 }
 
+async function refreshStatus() {
+  if (!repo.value) return;
+  const status = await getStatus(repoPath.value).catch(() => null);
+  if (!status) return;
+  changes.value = status.changes;
+  unversioned.value = status.unversioned;
+  emitMeta();
+}
+
 async function handleRefsChange(refs: string[]) {
   logRefs.value = refs;
   if (!repo.value) return;
@@ -207,12 +218,12 @@ async function handleRefsChange(refs: string[]) {
 }
 
 async function handleLogChanged(message?: string) {
-  if (message) {
-    statusText.value = message;
-  }
-  repo.value = await openRepo(repoPath.value);
-  selectedHash.value = "";
-  await refreshAll();
+  await withBusy(message || "正在刷新…", async () => {
+    repo.value = await openRepo(repoPath.value);
+    selectedHash.value = "";
+    await refreshAll();
+    return true;
+  });
 }
 
 function openAmend() {
@@ -514,8 +525,9 @@ function toggleTerminal() {
 
 function onGlobalKey(event: KeyboardEvent) {
   if (!props.active || !repo.value) return;
-  if (event.altKey && event.code === "F12") {
+  if (event.altKey && (event.code === "F12" || event.key === "F12")) {
     event.preventDefault();
+    event.stopPropagation();
     toggleTerminal();
   }
 }
@@ -523,21 +535,21 @@ function onGlobalKey(event: KeyboardEvent) {
 watch(
   () => props.active,
   (active) => {
-    if (active) {
-      void bootstrap(!loaded.value);
+    if (active && !loaded.value) {
+      void bootstrap(true);
     }
   },
 );
 
 onMounted(() => {
-  window.addEventListener("keydown", onGlobalKey);
+  window.addEventListener("keydown", onGlobalKey, true);
   if (props.active) {
     void bootstrap(true);
   }
 });
 
 onUnmounted(() => {
-  window.removeEventListener("keydown", onGlobalKey);
+  window.removeEventListener("keydown", onGlobalKey, true);
 });
 </script>
 
@@ -553,9 +565,11 @@ onUnmounted(() => {
         :recent="recent"
         :version="version"
         :files-open="showFiles"
+        :terminal-open="showTerminal"
         :busy-text="statusText"
         :recent-branches="recentBranches"
         @files="showFiles = !showFiles"
+        @terminal="toggleTerminal"
         @open="emit('open')"
         @open-path="emit('openPath', $event)"
         @fetch="handleFetch"
@@ -572,6 +586,7 @@ onUnmounted(() => {
         v-if="showFiles"
         :repo-path="repoPath"
         @close="showFiles = false"
+        @changed="refreshStatus"
       />
       <main v-else class="workspace">
         <LogPanel
@@ -592,9 +607,9 @@ onUnmounted(() => {
       </main>
       <TerminalPanel
         v-if="terminalReady"
-        v-show="showTerminal && !showFiles"
+        v-show="showTerminal"
         :repo-path="repoPath"
-        :visible="showTerminal && active && !showFiles"
+        :visible="showTerminal && active"
         @close="showTerminal = false"
       />
       <StatusBar :text="statusText" :error="errorText" />

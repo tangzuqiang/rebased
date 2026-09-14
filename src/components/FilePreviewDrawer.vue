@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import "highlight.js/styles/atom-one-dark.css";
-import { listWorktree, previewFile } from "../api";
-import { highlightCode, languageFromPath } from "../highlight";
+import { listWorktree, previewFile, saveWorktreeFile } from "../api";
+import { languageFromPath } from "../highlight";
+import { notify } from "../notify";
 import type { FilePreview } from "../types";
 import Icons from "./Icons.vue";
 
@@ -19,6 +20,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: [];
+  changed: [];
 }>();
 
 const query = ref("");
@@ -28,12 +30,16 @@ const tree = ref<TreeNode[]>([]);
 const expanded = ref(new Set<string>());
 const selected = ref("");
 const preview = ref<FilePreview | null>(null);
-const previewHtml = ref("");
+const draft = ref("");
+const savedContent = ref("");
 const loadingPreview = ref(false);
+const saving = ref(false);
 const previewError = ref("");
 
 const visible = computed(() => flatten(tree.value, query.value.trim().toLowerCase(), expanded.value));
-const lineCount = computed(() => (preview.value?.content ? preview.value.content.split("\n").length : 0));
+const lineCount = computed(() => (draft.value ? draft.value.split("\n").length : 0));
+const editable = computed(() => Boolean(preview.value && !preview.value.binary && !preview.value.truncated));
+const dirty = computed(() => editable.value && draft.value !== savedContent.value);
 
 function buildTree(paths: string[]) {
   const root: TreeNode[] = [];
@@ -101,7 +107,7 @@ async function loadTree() {
   try {
     const paths = await listWorktree(props.repoPath);
     tree.value = buildTree(paths);
-    expanded.value = new Set(tree.value.filter((node) => node.dir).map((node) => node.path));
+    expanded.value = new Set();
   } catch (error) {
     treeError.value = error instanceof Error ? error.message : String(error);
     tree.value = [];
@@ -110,16 +116,25 @@ async function loadTree() {
   }
 }
 
+function applyPreview(result: FilePreview) {
+  preview.value = result;
+  draft.value = result.binary ? "" : result.content;
+  savedContent.value = draft.value;
+}
+
 async function openFile(path: string) {
+  if (path === selected.value && preview.value) return;
+  if (dirty.value && !window.confirm("当前文件有未保存修改，确定丢弃吗？")) {
+    return;
+  }
   selected.value = path;
   loadingPreview.value = true;
   previewError.value = "";
   preview.value = null;
-  previewHtml.value = "";
+  draft.value = "";
+  savedContent.value = "";
   try {
-    const result = await previewFile(props.repoPath, path);
-    preview.value = result;
-    previewHtml.value = result.binary ? "" : highlightCode(result.content, path);
+    applyPreview(await previewFile(props.repoPath, path));
   } catch (error) {
     previewError.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -127,9 +142,40 @@ async function openFile(path: string) {
   }
 }
 
+async function saveFile() {
+  if (!editable.value || !selected.value || saving.value) return;
+  saving.value = true;
+  previewError.value = "";
+  try {
+    applyPreview(await saveWorktreeFile(props.repoPath, selected.value, draft.value));
+    notify(`已保存 ${selected.value}`);
+    emit("changed");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    previewError.value = message;
+    notify(message, "error");
+  } finally {
+    saving.value = false;
+  }
+}
+
 function onRow(node: TreeNode) {
   if (node.dir) toggleDir(node.path);
   else void openFile(node.path);
+}
+
+function onEditorKey(event: KeyboardEvent) {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+    event.preventDefault();
+    void saveFile();
+  }
+}
+
+function requestClose() {
+  if (dirty.value && !window.confirm("当前文件有未保存修改，确定关闭吗？")) {
+    return;
+  }
+  emit("close");
 }
 
 onMounted(() => {
@@ -141,6 +187,8 @@ watch(
   () => {
     selected.value = "";
     preview.value = null;
+    draft.value = "";
+    savedContent.value = "";
     void loadTree();
   },
 );
@@ -151,7 +199,7 @@ watch(
     <section class="panel">
       <aside class="tree">
         <header>
-          <strong>文件预览</strong>
+          <strong>项目</strong>
           <button type="button" class="icon-btn" title="刷新" @click="loadTree">
             <Icons name="refresh" :size="13" />
           </button>
@@ -185,24 +233,43 @@ watch(
 
       <article class="preview">
         <header>
-          <span class="path" :title="selected">{{ selected || "选择一个文件查看内容" }}</span>
+          <span class="path" :title="selected">
+            {{ selected || "选择一个文件查看内容" }}
+            <em v-if="dirty">*</em>
+          </span>
           <span v-if="preview" class="muted">
             {{ languageFromPath(preview.path) || "文本" }}
             · {{ formatSize(preview.size) }}
             · {{ lineCount }} 行
           </span>
-          <button type="button" class="icon-btn" title="关闭" @click="emit('close')">
+          <button
+            type="button"
+            class="save-btn"
+            :disabled="!dirty || saving"
+            @click="saveFile"
+          >
+            <span v-if="saving" class="btn-spinner" />
+            {{ saving ? "保存中…" : "保存" }}
+          </button>
+          <button type="button" class="icon-btn" title="关闭" @click="requestClose">
             <Icons name="close" :size="12" />
           </button>
         </header>
         <div class="scroll body">
           <p v-if="loadingPreview" class="empty-hint">正在加载文件…</p>
-          <p v-else-if="previewError" class="empty-hint">{{ previewError }}</p>
-          <p v-else-if="preview?.binary" class="empty-hint">二进制文件，无法预览</p>
+          <p v-else-if="preview?.binary" class="empty-hint">二进制文件，无法预览或编辑</p>
           <p v-else-if="!selected" class="empty-hint">从左侧文件树选择一个文件</p>
           <template v-else>
-            <p v-if="preview?.truncated" class="warn">文件较大，仅预览前 512 KB</p>
-            <pre class="hljs" v-html="previewHtml" />
+            <p v-if="preview?.truncated" class="warn">文件较大，仅预览前 512 KB，不能在此编辑</p>
+            <p v-if="previewError" class="warn">{{ previewError }}</p>
+            <textarea
+              v-model="draft"
+              class="editor"
+              spellcheck="false"
+              :readonly="!editable"
+              :placeholder="editable ? '在此编辑文件内容，Ctrl+S 保存' : ''"
+              @keydown="onEditorKey"
+            />
           </template>
         </div>
       </article>
@@ -255,6 +322,26 @@ header {
   white-space: nowrap;
 }
 
+.path em {
+  color: #c9a227;
+  font-style: normal;
+}
+
+.save-btn {
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.save-btn:disabled {
+  opacity: 0.45;
+}
+
 .search {
   display: flex;
   align-items: center;
@@ -284,6 +371,8 @@ header {
 }
 
 .body {
+  display: flex;
+  flex-direction: column;
   background: #282c34;
 }
 
@@ -330,13 +419,26 @@ header {
   background: #3a3420;
 }
 
-.hljs {
+.editor {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
   margin: 0;
   padding: 12px 16px 20px;
+  border: 0;
+  outline: none;
+  resize: none;
+  color: #abb2bf;
+  background: transparent;
   font-family: Consolas, "Courier New", monospace;
   font-size: 12px;
   line-height: 18px;
   white-space: pre;
-  background: transparent;
+  tab-size: 4;
+}
+
+.editor[readonly] {
+  color: #9aa3ad;
 }
 </style>
