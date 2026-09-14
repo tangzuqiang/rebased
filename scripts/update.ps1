@@ -69,6 +69,11 @@ function Find-Installer([string]$Version) {
             return $found
         }
     }
+    $plain = Join-Path $root "src-tauri\target\release\rebased.exe"
+    if (Test-Path $plain) {
+        Write-Host "  未打出 NSIS 安装包，改用 rebased.exe"
+        return (Get-Item $plain)
+    }
     return $null
 }
 
@@ -99,55 +104,47 @@ function Publish-Installer([string]$Installer, [string]$Version, [string]$Notes)
 
     $exe = Get-Item $Installer
     $hash = (Get-FileHash -Algorithm SHA256 $exe.FullName).Hash.ToLower()
-    $fileName = $exe.Name
+    $isSetup = $exe.Name -match "setup|\.msi$"
+    $fileName = if ($isSetup) { $exe.Name } else { "Rebased_${Version}_x64-setup.exe" }
     $feedUrl = "http://$hostName/rebased/$fileName"
-    $manifest = @{
+    $manifestPath = Join-Path $env:TEMP "rebased-latest.json"
+    $manifestObj = [ordered]@{
         version    = $Version
         notes      = $Notes
         url        = $feedUrl
         sha256     = $hash
         silentArgs = "/S"
-    } | ConvertTo-Json -Compress
-    $manifestPath = Join-Path $env:TEMP "rebased-latest.json"
-    Write-Utf8File $manifestPath $manifest
+    }
+    $json = ($manifestObj | ConvertTo-Json -Compress)
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($manifestPath, $json, $utf8NoBom)
 
     Write-Host "上传 $fileName 和 latest.json 到 ${user}@${hostName}:$remoteDir"
-
-    $py = @'
-import os, posixpath, sys
-try:
-    import paramiko
-except ImportError:
-    sys.exit("需要先安装：pip install paramiko")
-
-host = os.environ["UPDATE_HOST"]
-user = os.environ["UPDATE_USER"]
-password = os.environ["UPDATE_PASS"]
-remote_dir = os.environ["UPDATE_DIR"]
-local_installer = sys.argv[1]
-local_manifest = sys.argv[2]
-remote_name = sys.argv[3]
-
-client = paramiko.SSHClient()
-client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-client.connect(host, username=user, password=password, timeout=20)
-sftp = client.open_sftp()
-try:
-    sftp.mkdir(remote_dir)
-except OSError:
-    pass
-sftp.put(local_installer, posixpath.join(remote_dir, remote_name))
-sftp.put(local_manifest, posixpath.join(remote_dir, "latest.json"))
-sftp.close()
-client.close()
-print("已发布", remote_name)
-'@
 
     $env:UPDATE_HOST = $hostName
     $env:UPDATE_USER = $user
     $env:UPDATE_PASS = $pass
     $env:UPDATE_DIR = $remoteDir
-    python -c $py $exe.FullName $manifestPath $fileName
+    $env:UPDATE_VERSION = $Version
+    $env:UPDATE_NOTES = $Notes
+    $env:UPDATE_URL = $feedUrl
+    $env:UPDATE_SHA256 = $hash
+    $uploader = Join-Path $PSScriptRoot "upload-update.py"
+    python $uploader $exe.FullName $manifestPath $fileName
+    if ($LASTEXITCODE -ne 0) {
+        throw "上传失败，退出码 $LASTEXITCODE"
+    }
+
+    $checkUrl = "http://$hostName/rebased/$fileName"
+    try {
+        $head = Invoke-WebRequest -Uri $checkUrl -Method Head -UseBasicParsing -TimeoutSec 20
+        if ([int]$head.StatusCode -ge 400) {
+            throw "HTTP $($head.StatusCode)"
+        }
+        Write-Host "安装包地址可访问：$checkUrl"
+    } catch {
+        throw "安装包已上传，但 HTTP 无法下载 $checkUrl ：$($_.Exception.Message)"
+    }
     Write-Host "清单地址：http://$hostName/rebased/latest.json"
 }
 

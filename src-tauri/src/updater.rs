@@ -54,10 +54,14 @@ pub fn install_update(app: AppHandle) -> Result<String, String> {
     if manifest.url.trim().is_empty() {
         return Err("更新清单没有安装包地址".to_string());
     }
-    let installer = download_installer(&manifest)?;
-    spawn_silent(&installer, manifest.silent_args.as_deref())?;
+    let package = download_installer(&manifest)?;
+    if is_setup_package(&manifest, &package) {
+        spawn_silent(&package, manifest.silent_args.as_deref())?;
+    } else {
+        spawn_replace(&package)?;
+    }
     app.exit(0);
-    Ok("已启动静默安装，应用即将退出".to_string())
+    Ok("已启动更新，应用即将退出".to_string())
 }
 
 fn fetch_manifest() -> Result<UpdateManifest, String> {
@@ -116,6 +120,37 @@ fn download_installer(manifest: &UpdateManifest) -> Result<PathBuf, String> {
     let mut file = File::create(&path).map_err(|e| format!("无法保存安装包：{e}"))?;
     file.write_all(&bytes).map_err(|e| format!("写入安装包失败：{e}"))?;
     Ok(path)
+}
+
+fn is_setup_package(manifest: &UpdateManifest, path: &PathBuf) -> bool {
+    let url = manifest.url.to_ascii_lowercase();
+    let name = path
+        .file_name()
+        .and_then(|item| item.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    url.contains("setup") || url.ends_with(".msi") || name.contains("setup") || name.ends_with(".msi")
+}
+
+fn spawn_replace(new_exe: &PathBuf) -> Result<(), String> {
+    let current = std::env::current_exe().map_err(|e| format!("无法定位当前程序：{e}"))?;
+    let bat = std::env::temp_dir().join("rebased-replace.bat");
+    let script = format!(
+        "@echo off\r\nping 127.0.0.1 -n 3 >nul\r\ncopy /y \"{}\" \"{}\"\r\nif errorlevel 1 exit /b 1\r\nstart \"\" \"{}\"\r\ndel \"%~f0\"\r\n",
+        new_exe.display(),
+        current.display(),
+        current.display()
+    );
+    std::fs::write(&bat, script).map_err(|e| format!("无法写入更新脚本：{e}"))?;
+    let mut cmd = Command::new("cmd");
+    cmd.arg("/C").arg(&bat);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd.spawn().map_err(|e| format!("无法启动更新替换：{e}"))?;
+    Ok(())
 }
 
 fn spawn_silent(path: &PathBuf, silent_args: Option<&str>) -> Result<(), String> {
