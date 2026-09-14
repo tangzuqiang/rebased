@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import {
+  appVersion,
+  checkUpdate,
   getRecentProjects,
   getSession,
   pickAndOpenRepo,
@@ -15,6 +17,7 @@ import RepoWorkspace from "./components/RepoWorkspace.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
 import ToastHost from "./components/ToastHost.vue";
 import WelcomeView from "./components/WelcomeView.vue";
+import { notify } from "./notify";
 
 const TABS_KEY = "rebased.openRepos";
 const ACTIVE_KEY = "rebased.activeRepo";
@@ -24,6 +27,7 @@ const tabs = ref<ProjectTab[]>([]);
 const activePath = ref("");
 const recent = ref<RecentProject[]>([]);
 const showSettings = ref(false);
+const version = ref("");
 let persistTimer = 0;
 
 function persist() {
@@ -138,6 +142,7 @@ function applySession(session: { tabs: Array<{ path: string; name: string }>; ac
 }
 
 onMounted(async () => {
+  version.value = await appVersion().catch(() => "");
   recent.value = await getRecentProjects().catch(() => []);
   const session = await getSession().catch(() => ({ tabs: [], activePath: "" }));
   if (session.tabs.length) {
@@ -155,6 +160,13 @@ onMounted(async () => {
       localStorage.removeItem(LAST_REPO_KEY);
     }
   }
+  void checkUpdate()
+    .then((info) => {
+      if (info.available) {
+        notify(`发现新版本 ${info.latest}，可在设置中更新`);
+      }
+    })
+    .catch(() => undefined);
 });
 </script>
 
@@ -170,6 +182,7 @@ onMounted(async () => {
     <WelcomeView
       v-if="!tabs.length"
       :recent="recent"
+      :version="version"
       @open="handleOpen"
       @open-path="handleOpenPath"
       @remove-recent="handleRemoveRecent"
@@ -181,6 +194,7 @@ onMounted(async () => {
       :path="tab.path"
       :active="sameRepo(tab.path, activePath)"
       :recent="recent"
+      :version="version"
       @open="handleOpen"
       @open-path="handleOpenPath"
       @settings="showSettings = true"

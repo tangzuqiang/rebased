@@ -1,0 +1,7 @@
+{
+  "version": "0.1.0",
+  "notes": "初始更新通道。发布新安装包后，把 version、url、sha256 改成新版本即可。",
+  "url": "http://111.230.247.111/rebased/Rebased_0.1.0_x64-setup.exe",
+  "sha256": "",
+  "silentArgs": "/S"
+}

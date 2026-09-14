@@ -490,6 +490,48 @@ pub fn branches(repo: &Path) -> Result<Vec<BranchInfo>, String> {
     Ok(list)
 }
 
+pub fn recent_branches(repo: &Path, limit: usize) -> Result<Vec<String>, String> {
+    let cap = if limit == 0 { 4 } else { limit };
+    let known: Vec<String> = match branches(repo) {
+        Ok(items) => items
+            .into_iter()
+            .filter(|item| item.kind != "tag")
+            .map(|item| item.name)
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    let raw = run_git(repo, &["reflog", "--format=%gs", "-n", "200"]).unwrap_or_default();
+    let mut seen = Vec::new();
+    let mut list = Vec::new();
+    for line in raw.lines() {
+        let Some(rest) = line.strip_prefix("checkout: moving from ") else {
+            continue;
+        };
+        let Some((_, to)) = rest.split_once(" to ") else {
+            continue;
+        };
+        let name = to.trim();
+        if name.is_empty() || name == "HEAD" || seen.iter().any(|item| item == name) {
+            continue;
+        }
+        if !known.is_empty() && !known.iter().any(|item| item == name) {
+            continue;
+        }
+        seen.push(name.to_string());
+        list.push(name.to_string());
+        if list.len() >= cap {
+            break;
+        }
+    }
+    if list.is_empty() {
+        let current = current_branch(repo);
+        if !current.is_empty() && current != "HEAD" {
+            list.push(current);
+        }
+    }
+    Ok(list)
+}
+
 pub fn stage(repo: &Path, path: &str) -> Result<(), String> {
     let actual = display_to_path(path);
     run_git(repo, &["add", "--", &actual])?;

@@ -6,6 +6,7 @@ import Icons from "./Icons.vue";
 
 defineProps<{
   recent: RecentProject[];
+  version?: string;
 }>();
 
 const emit = defineEmits<{
@@ -20,7 +21,7 @@ const path = ref("");
 <template>
   <div class="welcome">
     <img src="/rebased.svg" width="72" height="72" alt="Rebased" />
-    <h1>Rebased</h1>
+    <h1>Rebased <span v-if="version" class="ver">{{ version }}</span></h1>
     <p>基于原项目界面还原的轻量 Git 客户端</p>
     <div class="actions">
       <button class="primary-btn" @click="emit('open')">打开仓库…</button>
@@ -74,6 +75,13 @@ h1 {
   margin: 8px 0 0;
   font-size: 28px;
   font-weight: 560;
+}
+
+.ver {
+  margin-left: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-muted);
 }
 
 p {

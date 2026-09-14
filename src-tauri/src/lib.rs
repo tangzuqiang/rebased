@@ -2,6 +2,7 @@ mod ai;
 mod git;
 mod store;
 mod term;
+mod updater;
 
 use git::{
     AppState, BranchInfo, FileDiff, FilePreview, GitCommit, GitFile, MergeFileContent, MergeOutcome,
@@ -9,7 +10,7 @@ use git::{
 };
 use std::path::PathBuf;
 use store::{AppStore, RecentProject, SessionState};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 fn repo_dir(state: &AppState, repo: Option<String>) -> Result<PathBuf, String> {
     state.resolve_repo(repo.as_deref())
@@ -52,6 +53,15 @@ fn get_commit_files(state: State<AppState>, hash: String, repo: Option<String>) 
 #[tauri::command]
 fn get_branches(state: State<AppState>, repo: Option<String>) -> Result<Vec<BranchInfo>, String> {
     git::branches(&repo_dir(&state, repo)?)
+}
+
+#[tauri::command]
+fn get_recent_branches(
+    state: State<AppState>,
+    limit: Option<u32>,
+    repo: Option<String>,
+) -> Result<Vec<String>, String> {
+    git::recent_branches(&repo_dir(&state, repo)?, limit.unwrap_or(4) as usize)
 }
 
 #[tauri::command]
@@ -435,6 +445,21 @@ fn close_terminal(hub: State<term::TerminalHub>, id: String) -> Result<(), Strin
     term::close(&*hub, &id)
 }
 
+#[tauri::command]
+fn check_update() -> Result<updater::UpdateInfo, String> {
+    updater::check_update()
+}
+
+#[tauri::command]
+fn install_update(app: AppHandle) -> Result<String, String> {
+    updater::install_update(app)
+}
+
+#[tauri::command]
+fn app_version() -> String {
+    updater::current_version()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -443,6 +468,13 @@ pub fn run() {
         .manage(AppState::new())
         .manage(AppStore::open())
         .manage(term::TerminalHub::new())
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                let title = format!("Rebased {}", updater::current_version());
+                let _ = window.set_title(&title);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             open_repo,
             get_repo,
@@ -450,6 +482,7 @@ pub fn run() {
             get_log,
             get_commit_files,
             get_branches,
+            get_recent_branches,
             stage_file,
             unstage_file,
             commit_changes,
@@ -504,7 +537,10 @@ pub fn run() {
             start_terminal,
             write_terminal,
             resize_terminal,
-            close_terminal
+            close_terminal,
+            check_update,
+            install_update,
+            app_version
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

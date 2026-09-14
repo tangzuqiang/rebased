@@ -148,6 +148,7 @@ watch(selectedPath, () => {
               :exclude="exclude"
               :selected="theirs"
               :enable-actions="false"
+              :default-open="['local', 'remote']"
               @select="chooseTheirs"
             />
           </div>

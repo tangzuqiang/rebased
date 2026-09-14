@@ -23,7 +23,7 @@ const positioned = computed<CSSProperties>(() => ({
 
 function updatePosition() {
   if (props.x != null && props.y != null) {
-    const width = 280;
+    const width = 320;
     const height = 420;
     let left = props.x;
     let top = props.y;
@@ -44,7 +44,7 @@ function updatePosition() {
   const anchor = props.anchor;
   if (!anchor) return;
   const rect = anchor.getBoundingClientRect();
-  const width = Math.max(rect.width, 280);
+  const width = Math.max(rect.width, 320);
   let left = rect.left;
   if (left + width > window.innerWidth - 8) {
     left = Math.max(8, window.innerWidth - width - 8);

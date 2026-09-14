@@ -1,3 +1,11 @@
+export interface UpdateInfo {
+  current: string;
+  latest: string;
+  notes: string;
+  url: string;
+  available: boolean;
+}
+
 export interface AiConfig {
   baseUrl: string;
   apiKey: string;

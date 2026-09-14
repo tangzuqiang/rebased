@@ -8,6 +8,7 @@ import {
   getBranches,
   getCommitFiles,
   getLog,
+  getRecentBranches,
   getMergeState,
   getStatus,
   mergeAbort,
@@ -44,6 +45,7 @@ const props = defineProps<{
   path: string;
   active: boolean;
   recent: RecentProject[];
+  version?: string;
 }>();
 
 const emit = defineEmits<{
@@ -56,6 +58,7 @@ const emit = defineEmits<{
 
 const repo = ref<RepoInfo | null>(null);
 const branches = ref<BranchInfo[]>([]);
+const recentBranches = ref<string[]>([]);
 const changes = ref<GitFile[]>([]);
 const unversioned = ref<GitFile[]>([]);
 const commits = ref<GitCommit[]>([]);
@@ -107,8 +110,10 @@ async function withBusy<T>(label: string, task: () => Promise<T>): Promise<T | u
     statusText.value = "就绪";
     return result;
   } catch (error) {
-    errorText.value = error instanceof Error ? error.message : String(error);
+    const message = error instanceof Error ? error.message : String(error);
+    errorText.value = message;
     statusText.value = "失败";
+    notify(message, "error");
     return undefined;
   } finally {
     busy.value = false;
@@ -119,10 +124,11 @@ async function refreshAll() {
   if (!repo.value) return;
   const current = repoPath.value;
   const errors: string[] = [];
-  const [statusResult, logResult, branchResult] = await Promise.allSettled([
+  const [statusResult, logResult, branchResult, recentResult] = await Promise.allSettled([
     getStatus(current),
     getLog(current, 200, logRefs.value),
     getBranches(current),
+    getRecentBranches(current, 4),
   ]);
 
   if (statusResult.status === "fulfilled") {
@@ -145,6 +151,10 @@ async function refreshAll() {
     branches.value = branchResult.value;
   } else {
     errors.push(String(branchResult.reason));
+  }
+
+  if (recentResult.status === "fulfilled") {
+    recentBranches.value = recentResult.value.slice(0, 4);
   }
 
   if (selectedHash.value) {
@@ -237,28 +247,48 @@ async function handleCommit(payload: {
 }
 
 async function handleCheckout(name: string) {
-  await withBusy(`正在切换到 ${name}…`, async () => {
+  const ok = await withBusy(`正在切换到 ${name}…`, async () => {
     await checkoutBranch(repoPath.value, name);
     repo.value = await openRepo(repoPath.value);
     selectedHash.value = "";
     await refreshAll();
+    return true;
   });
+  if (ok) notify(`已切换到 ${repo.value?.branch || name}`);
 }
 
 async function handleFetch() {
-  await withBusy("正在获取…", async () => {
+  const ok = await withBusy("正在获取…", async () => {
     await fetchRemote(repoPath.value);
     repo.value = await openRepo(repoPath.value);
     await refreshAll();
+    return true;
   });
+  if (ok) notify("获取完成");
 }
 
 async function handlePull() {
-  await withBusy("正在拉取…", async () => {
+  const ok = await withBusy("正在拉取…", async () => {
     await pullRemote(repoPath.value);
     repo.value = await openRepo(repoPath.value);
     await refreshAll();
+    return true;
   });
+  if (ok) notify("拉取完成");
+}
+
+function openNewBranchFromCurrent() {
+  const name = repo.value?.branch || branches.value.find((item) => item.current)?.name || "";
+  if (!name) return;
+  actionBranch.value = branches.value.find((item) => item.name === name) ?? {
+    name,
+    current: true,
+    remote: false,
+    kind: "local",
+  };
+  actionName.value = "";
+  checkoutNewBranch.value = true;
+  branchDialog.value = "new";
 }
 
 function suggestedTrack(branch: BranchInfo) {
@@ -276,6 +306,10 @@ function localNameFromRemote(name: string) {
 async function handleBranchAction(payload: { action: BranchMenuAction; branch: BranchInfo }) {
   actionBranch.value = payload.branch;
   branchError.value = "";
+  if (payload.action === "checkout") {
+    await handleCheckout(payload.branch.name);
+    return;
+  }
   if (payload.action === "new-branch") {
     actionName.value = "";
     checkoutNewBranch.value = true;
@@ -308,7 +342,10 @@ async function handleBranchAction(payload: { action: BranchMenuAction; branch: B
       await refreshAll();
       return result || "已更新";
     });
-    if (message) statusText.value = message;
+    if (message) {
+      statusText.value = message;
+      notify(message);
+    }
     return;
   }
   if (payload.action === "track") {
@@ -330,32 +367,41 @@ async function handleBranchAction(payload: { action: BranchMenuAction; branch: B
       await refreshAll();
       return result;
     });
-    if (message) statusText.value = message;
+    if (message) {
+      statusText.value = message;
+      notify(message);
+    }
   }
 }
 
 async function confirmNewBranch() {
   const source = actionBranch.value?.name;
-  if (!source || !actionName.value.trim()) return;
-  await withBusy("正在创建分支…", async () => {
-    await createBranchAt(repoPath.value, actionName.value.trim(), source, checkoutNewBranch.value);
+  const name = actionName.value.trim();
+  if (!source || !name) return;
+  const ok = await withBusy("正在创建分支…", async () => {
+    await createBranchAt(repoPath.value, name, source, checkoutNewBranch.value);
     branchDialog.value = "";
     repo.value = await openRepo(repoPath.value);
     selectedHash.value = "";
     await refreshAll();
+    return true;
   });
+  if (ok) notify(`已创建分支 ${name}`);
 }
 
 async function confirmRenameBranch() {
   const old = actionBranch.value?.name;
-  if (!old || !actionName.value.trim()) return;
-  await withBusy("正在重命名分支…", async () => {
-    await renameBranch(repoPath.value, old, actionName.value.trim());
+  const name = actionName.value.trim();
+  if (!old || !name) return;
+  const ok = await withBusy("正在重命名分支…", async () => {
+    await renameBranch(repoPath.value, old, name);
     branchDialog.value = "";
     repo.value = await openRepo(repoPath.value);
     selectedHash.value = "";
     await refreshAll();
+    return true;
   });
+  if (ok) notify(`已重命名为 ${name}`);
 }
 
 async function handlePush(payload?: { remote: string; branch: string }) {
@@ -378,18 +424,24 @@ async function handlePush(payload?: { remote: string; branch: string }) {
 }
 
 async function handleMerge(theirs: string) {
-  await withBusy(`正在合并 ${theirs}…`, async () => {
-    const outcome = await mergeBranch(repoPath.value, theirs);
+  const outcome = await withBusy(`正在合并 ${theirs}…`, async () => {
+    const result = await mergeBranch(repoPath.value, theirs);
     repo.value = await openRepo(repoPath.value);
     selectedHash.value = "";
     await refreshAll();
     showMerge.value = false;
-    if (outcome.status === "conflicts") {
-      conflictState.value = outcome.state;
+    if (result.status === "conflicts") {
+      conflictState.value = result.state;
       showConflicts.value = true;
       emitMeta();
     }
+    return result;
   });
+  if (outcome?.status === "conflicts") {
+    notify("合并存在冲突，请解决后继续", "error");
+  } else if (outcome) {
+    notify(`已合并 ${theirs}`);
+  }
 }
 
 async function handleAcceptConflict(payload: { path?: string; paths?: string[]; side: "ours" | "theirs" }) {
@@ -420,7 +472,7 @@ async function handleSaveResolved(content: string) {
 }
 
 async function handleContinueMerge() {
-  await withBusy("正在完成合并…", async () => {
+  const ok = await withBusy("正在完成合并…", async () => {
     await mergeContinue(repoPath.value);
     showConflicts.value = false;
     conflictState.value = null;
@@ -428,11 +480,13 @@ async function handleContinueMerge() {
     repo.value = await openRepo(repoPath.value);
     selectedHash.value = "";
     await refreshAll();
+    return true;
   });
+  if (ok) notify("合并已完成");
 }
 
 async function handleAbortMerge() {
-  await withBusy("正在中止合并…", async () => {
+  const ok = await withBusy("正在中止合并…", async () => {
     await mergeAbort(repoPath.value);
     showConflicts.value = false;
     conflictState.value = null;
@@ -440,7 +494,9 @@ async function handleAbortMerge() {
     repo.value = await openRepo(repoPath.value);
     selectedHash.value = "";
     await refreshAll();
+    return true;
   });
+  if (ok) notify("已中止合并");
 }
 
 function openConflicts() {
@@ -495,26 +551,29 @@ onUnmounted(() => {
         :dirty="changes.length + unversioned.length > 0"
         :merging="Boolean(conflictState?.inProgress)"
         :recent="recent"
+        :version="version"
         :files-open="showFiles"
+        :busy-text="statusText"
+        :recent-branches="recentBranches"
         @files="showFiles = !showFiles"
         @open="emit('open')"
         @open-path="emit('openPath', $event)"
-        @checkout="handleCheckout"
         @fetch="handleFetch"
         @pull="handlePull"
         @commit="showCommit = true"
         @push="showPush = true"
         @merge="showMerge = true"
+        @new-branch="openNewBranchFromCurrent"
         @conflicts="openConflicts"
         @settings="emit('settings')"
         @branch-action="handleBranchAction"
       />
-      <main class="workspace">
-        <FilePreviewDrawer
-          v-if="showFiles"
-          :repo-path="repoPath"
-          @close="showFiles = false"
-        />
+      <FilePreviewDrawer
+        v-if="showFiles"
+        :repo-path="repoPath"
+        @close="showFiles = false"
+      />
+      <main v-else class="workspace">
         <LogPanel
           :repo="repo"
           :commits="commits"
@@ -533,12 +592,18 @@ onUnmounted(() => {
       </main>
       <TerminalPanel
         v-if="terminalReady"
-        v-show="showTerminal"
+        v-show="showTerminal && !showFiles"
         :repo-path="repoPath"
-        :visible="showTerminal && active"
+        :visible="showTerminal && active && !showFiles"
         @close="showTerminal = false"
       />
       <StatusBar :text="statusText" :error="errorText" />
+      <div v-if="busy" class="git-busy-overlay">
+        <div class="git-busy-card">
+          <span class="btn-spinner" />
+          <span>{{ statusText }}</span>
+        </div>
+      </div>
       <CommitDialog
         v-if="active && showCommit"
         :repo="repo"
@@ -563,7 +628,10 @@ onUnmounted(() => {
         <label><input v-model="checkoutNewBranch" type="checkbox" /> 创建后切换</label>
         <template #footer>
           <button type="button" class="secondary-btn" @click="branchDialog = ''">取消</button>
-          <button type="button" class="primary-btn" :disabled="busy || !actionName.trim()" @click="confirmNewBranch">创建</button>
+          <button type="button" class="primary-btn" :disabled="busy || !actionName.trim()" @click="confirmNewBranch">
+            <span v-if="busy" class="btn-spinner" />
+            创建
+          </button>
         </template>
       </Modal>
       <Modal v-if="branchDialog === 'rename'" title="重命名分支" @close="branchDialog = ''">
@@ -571,7 +639,10 @@ onUnmounted(() => {
         <label>新名称 <input v-model="actionName" /></label>
         <template #footer>
           <button type="button" class="secondary-btn" @click="branchDialog = ''">取消</button>
-          <button type="button" class="primary-btn" :disabled="busy || !actionName.trim()" @click="confirmRenameBranch">重命名</button>
+          <button type="button" class="primary-btn" :disabled="busy || !actionName.trim()" @click="confirmRenameBranch">
+            <span v-if="busy" class="btn-spinner" />
+            重命名
+          </button>
         </template>
       </Modal>
       <Modal v-if="branchDialog === 'diff'" title="与工作树的差异" wide @close="branchDialog = ''">
@@ -618,10 +689,34 @@ onUnmounted(() => {
 
 <style scoped>
 .workspace-root {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+.git-busy-overlay {
+  position: absolute;
+  inset: 36px 0 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(43, 45, 48, 0.55);
+  pointer-events: all;
+}
+
+.git-busy-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  background: #3c3f41;
+  border: 1px solid var(--border);
+  color: var(--text);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
 
 .workspace {

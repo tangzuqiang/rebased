@@ -148,8 +148,7 @@ watch(
 
 <template>
   <div class="drawer">
-    <button type="button" class="mask" @click="emit('close')" />
-    <section class="panel" @click.stop>
+    <section class="panel">
       <aside class="tree">
         <header>
           <strong>文件预览</strong>
@@ -213,30 +212,18 @@ watch(
 
 <style scoped>
 .drawer {
-  position: absolute;
-  inset: 0;
-  z-index: 40;
+  flex: 1;
+  min-height: 0;
   display: flex;
 }
 
-.mask {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  background: rgba(0, 0, 0, 0.35);
-}
-
 .panel {
-  position: relative;
-  z-index: 1;
-  width: min(960px, 88%);
-  height: 100%;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
   display: grid;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: minmax(220px, 280px) 1fr;
   background: #2b2d30;
-  border-right: 1px solid #54575b;
-  box-shadow: var(--shadow);
 }
 
 .tree,

@@ -17,6 +17,7 @@ import type {
   RepoInfo,
   SessionState,
   StatusPayload,
+  UpdateInfo,
 } from "./types";
 
 function withRepo(repo: string | undefined, extra: Record<string, unknown> = {}) {
@@ -57,6 +58,10 @@ export function getCommitFiles(repo: string | undefined, hash: string) {
 
 export function getBranches(repo?: string) {
   return invoke<BranchInfo[]>("get_branches", withRepo(repo));
+}
+
+export function getRecentBranches(repo?: string, limit = 4) {
+  return invoke<string[]>("get_recent_branches", withRepo(repo, { limit }));
 }
 
 export function stageFile(repo: string | undefined, path: string) {
@@ -285,4 +290,16 @@ export function resizeTerminal(id: string, cols: number, rows: number) {
 
 export function closeTerminal(id: string) {
   return invoke<void>("close_terminal", { id });
+}
+
+export function checkUpdate() {
+  return invoke<UpdateInfo>("check_update");
+}
+
+export function installUpdate() {
+  return invoke<string>("install_update");
+}
+
+export function appVersion() {
+  return invoke<string>("app_version");
 }

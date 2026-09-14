@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "update": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/update.ps1"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

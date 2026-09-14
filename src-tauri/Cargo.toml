@@ -27,6 +27,7 @@ ureq = { version = "3.4.1", features = ["json"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 portable-pty = "0.9.0"
 encoding_rs = "0.8.41"
+sha2 = "0.10"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

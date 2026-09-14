@@ -27,6 +27,13 @@ defineProps<{ name: string; size?: number }>();
     <path v-if="name === 'file'" d="M5 2h5l4 4v8H5zM10 2v4h4" />
     <path v-if="name === 'branch'" d="M4 3v7a3 3 0 0 0 3 3h2M4 3a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM12 13a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM12 3a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM12 3v7" />
     <circle v-if="name === 'dot'" cx="8" cy="8" r="2.2" fill="currentColor" stroke="none" />
+    <path
+      v-if="name === 'star'"
+      d="M8 1.6l1.7 3.5 3.8.6-2.8 2.7.7 3.8L8 10.4 4.6 12.2l.7-3.8-2.8-2.7 3.8-.6z"
+      fill="currentColor"
+      stroke="none"
+    />
+    <circle v-if="name === 'circle'" cx="8" cy="8" r="3.2" />
     <path v-if="name === 'sparkle'" d="M8 1.5l1.1 3.4L12.5 6 9.1 7.1 8 10.5 6.9 7.1 3.5 6l3.4-1.1zM12.5 10l.6 1.6L14.8 12l-1.7.5-.6 1.7-.5-1.7L10.3 12l1.7-.4z" fill="currentColor" stroke="none" />
   </svg>
 </template>

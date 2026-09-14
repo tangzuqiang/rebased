@@ -14,12 +14,14 @@ const props = defineProps<{
   merging?: boolean;
   recent?: RecentProject[];
   filesOpen?: boolean;
+  busyText?: string;
+  recentBranches?: string[];
+  version?: string;
 }>();
 
 const emit = defineEmits<{
   open: [];
   openPath: [path: string];
-  checkout: [name: string];
   fetch: [];
   pull: [];
   commit: [];
@@ -28,6 +30,7 @@ const emit = defineEmits<{
   conflicts: [];
   settings: [];
   files: [];
+  newBranch: [];
   branchAction: [payload: { action: BranchMenuAction; branch: BranchInfo }];
 }>();
 
@@ -54,17 +57,13 @@ function toggleBranch() {
   }
 }
 
-function chooseBranch(name: string) {
-  branchOpen.value = false;
-  emit("checkout", name);
-}
-
-function run(action: "commit" | "push" | "merge" | "fetch" | "pull") {
+function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branch") {
   branchOpen.value = false;
   if (action === "commit") emit("commit");
   else if (action === "push") emit("push");
   else if (action === "merge") emit("merge");
   else if (action === "fetch") emit("fetch");
+  else if (action === "new-branch") emit("newBranch");
   else emit("pull");
 }
 </script>
@@ -82,6 +81,7 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull") {
         <Icons name="folder" />
       </button>
       <img src="/rebased.svg" width="18" height="18" alt="" />
+      <span v-if="version" class="app-ver" :title="`Rebased ${version}`">{{ version }}</span>
       <button ref="repoAnchor" type="button" class="combo" @click="toggleRepo">
         <span>{{ repo.name }}</span>
         <Icons name="chevron" :size="12" />
@@ -108,25 +108,33 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull") {
       <span class="sep" />
       <span v-if="dirty" class="dirty" title="工作区有未提交变更">*</span>
 
-      <button ref="branchAnchor" type="button" class="combo" @click="toggleBranch">
-        <Icons name="branch" :size="12" />
-        <span>{{ repo.branch }}</span>
+      <button ref="branchAnchor" type="button" class="combo" :class="{ busy }" @click="toggleBranch">
+        <span v-if="busy" class="btn-spinner" />
+        <Icons v-else name="branch" :size="12" />
+        <span>{{ busy ? (busyText || "Git 操作中…") : repo.branch }}</span>
         <Icons name="chevron" :size="12" />
       </button>
       <PopupMenu :open="branchOpen" :anchor="branchAnchor" @close="branchOpen = false">
         <div class="item dim">Git 操作</div>
-        <button type="button" @click="run('commit')">提交…</button>
-        <button type="button" @click="run('push')">推送…</button>
-        <button type="button" :disabled="busy" @click="run('pull')">拉取</button>
-        <button type="button" :disabled="busy" @click="run('fetch')">获取</button>
-        <button type="button" @click="run('merge')">合并…</button>
+        <button type="button" :disabled="busy" @click="run('commit')">提交…</button>
+        <button type="button" :disabled="busy" @click="run('push')">推送…</button>
+        <button type="button" :disabled="busy" @click="run('pull')">
+          <span v-if="busy && busyText?.includes('拉取')" class="btn-spinner" />
+          拉取
+        </button>
+        <button type="button" :disabled="busy" @click="run('fetch')">
+          <span v-if="busy && busyText?.includes('获取')" class="btn-spinner" />
+          获取
+        </button>
+        <button type="button" :disabled="busy" @click="run('merge')">合并…</button>
+        <button type="button" :disabled="busy" @click="run('new-branch')">新建分支…</button>
         <button v-if="merging" type="button" @click="branchOpen = false; emit('conflicts')">解决冲突…</button>
         <div class="divider" />
         <BranchFilterList
           ref="branchFilter"
           :branches="branches"
           :selected="repo.branch"
-          @select="chooseBranch"
+          :recent="recentBranches"
           @action="branchOpen = false; emit('branchAction', $event)"
         />
       </PopupMenu>
@@ -192,11 +200,22 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull") {
   background: var(--bg-hover);
 }
 
+.combo.busy {
+  color: #7cb7ff;
+  cursor: wait;
+}
+
 .sep {
   width: 1px;
   height: 16px;
   background: var(--border-soft);
   margin: 0 2px;
+}
+
+.app-ver {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1;
 }
 
 .dirty {
