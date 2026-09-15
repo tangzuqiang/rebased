@@ -152,7 +152,7 @@ function fileName(path: string) {
 
 .pane {
   overflow: auto;
-  background: #1e1f22;
+  background: var(--bg-deep);
   border-right: 1px solid var(--border);
   font-family: Consolas, "Courier New", monospace;
   font-size: 12px;

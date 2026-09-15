@@ -18,6 +18,7 @@ import SettingsDialog from "./components/SettingsDialog.vue";
 import ToastHost from "./components/ToastHost.vue";
 import WelcomeView from "./components/WelcomeView.vue";
 import { notify } from "./notify";
+import { loadTheme } from "./theme";
 
 const TABS_KEY = "rebased.openRepos";
 const ACTIVE_KEY = "rebased.activeRepo";
@@ -142,6 +143,7 @@ function applySession(session: { tabs: Array<{ path: string; name: string }>; ac
 }
 
 onMounted(async () => {
+  await loadTheme().catch(() => undefined);
   version.value = await appVersion().catch(() => "");
   recent.value = await getRecentProjects().catch(() => []);
   const session = await getSession().catch(() => ({ tabs: [], activePath: "" }));

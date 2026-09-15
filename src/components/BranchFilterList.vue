@@ -333,7 +333,7 @@ defineExpose({
 }
 
 .leaf.current {
-  color: #7cb7ff;
+  color: var(--link);
 }
 
 .mark {

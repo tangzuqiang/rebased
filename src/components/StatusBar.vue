@@ -18,7 +18,7 @@ defineProps<{
   display: flex;
   align-items: center;
   border-top: 1px solid var(--border);
-  background: #2b2d30;
+  background: var(--bg);
   color: var(--text-muted);
 }
 

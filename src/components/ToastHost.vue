@@ -35,8 +35,8 @@ const toasts = useToasts();
   gap: 8px;
   padding: 10px 14px;
   border-radius: 6px;
-  background: #3c3f41;
-  border: 1px solid #54575b;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-elevated);
   box-shadow: var(--shadow);
   color: var(--text);
 }

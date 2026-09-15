@@ -468,7 +468,7 @@ textarea {
 .diff-body {
   flex: 1;
   min-height: 0;
-  background: #1e1f22;
+  background: var(--bg-deep);
 }
 
 .patch {

@@ -446,7 +446,7 @@ watch(
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(220px, 280px) 1fr;
-  background: #2b2d30;
+  background: var(--bg);
 }
 
 .tree,
@@ -479,7 +479,7 @@ header {
 }
 
 .path em {
-  color: #c9a227;
+  color: var(--text-warn);
   font-style: normal;
 }
 
@@ -529,7 +529,7 @@ header {
 .body {
   display: flex;
   flex-direction: column;
-  background: #282c34;
+  background: var(--bg-editor);
 }
 
 .row {
@@ -571,8 +571,8 @@ header {
 .warn {
   margin: 0;
   padding: 6px 12px;
-  color: #c9a227;
-  background: #3a3420;
+  color: var(--text-warn);
+  background: var(--bg-warn);
 }
 
 .editor {
@@ -585,7 +585,7 @@ header {
   border: 0;
   outline: none;
   resize: none;
-  color: #abb2bf;
+  color: var(--text-editor);
   background: transparent;
   font-family: Consolas, "Courier New", monospace;
   font-size: 12px;
@@ -595,7 +595,7 @@ header {
 }
 
 .editor[readonly] {
-  color: #9aa3ad;
+  color: var(--text-editor-muted);
 }
 
 .ctx-mask {
@@ -645,8 +645,8 @@ header {
   left: calc(100% - 4px);
   min-width: 248px;
   z-index: 1302;
-  background: #3c3f41;
-  border: 1px solid #54575b;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-elevated);
   border-radius: 6px;
   box-shadow: var(--shadow);
   padding: 4px 0;
@@ -664,8 +664,8 @@ header {
   transform: translateX(-50%);
   width: min(640px, calc(100vw - 32px));
   padding: 10px 12px 12px;
-  background: #3c3f41;
-  border: 1px solid #54575b;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-elevated);
   border-radius: 6px;
   box-shadow: var(--shadow);
 }

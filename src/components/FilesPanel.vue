@@ -56,7 +56,7 @@ function fileName(path: string) {
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  background: #2b2d30;
+  background: var(--bg);
 }
 
 .head {

@@ -307,8 +307,8 @@ label,
   width: min(420px, 70vw);
   max-height: 360px;
   overflow: auto;
-  background: #3c3f41;
-  border: 1px solid #54575b;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-elevated);
   border-radius: 6px;
   box-shadow: var(--shadow);
 }
@@ -325,7 +325,7 @@ label,
 
 .files {
   border-right: 1px solid var(--border);
-  background: #2b2d30;
+  background: var(--bg);
   overflow: auto;
 }
 
@@ -373,7 +373,7 @@ label,
 
 .pane {
   overflow: auto;
-  background: #1e1f22;
+  background: var(--bg-deep);
   border-right: 1px solid var(--border);
   font-family: Consolas, "Courier New", monospace;
   font-size: 12px;

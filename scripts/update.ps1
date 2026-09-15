@@ -1,6 +1,7 @@
 ﻿param(
     [switch]$SkipBuild,
-    [switch]$SkipPublish
+    [switch]$SkipPublish,
+    [switch]$NoPause
 )
 
 $ErrorActionPreference = "Stop"
@@ -55,6 +56,24 @@ function Sync-ProjectVersion([string]$Version) {
     Set-FirstMatch (Join-Path $root "src-tauri\Cargo.toml") '(?m)^version\s*=\s*"[^"]+"' "version = `"$Version`"" $Version
     Set-FirstMatch (Join-Path $root "src-tauri\tauri.conf.json") '("version"\s*:\s*")[^"]+"' "`${1}$Version`"" $Version
     Set-FirstMatch (Join-Path $root "package.json") '("version"\s*:\s*")[^"]+"' "`${1}$Version`"" $Version
+}
+
+function Get-ReleaseDir {
+    $dir = Join-Path $root "release"
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir | Out-Null
+    }
+    return $dir
+}
+
+function Copy-LocalInstaller([System.IO.FileInfo]$Installer, [string]$Version) {
+    $dir = Get-ReleaseDir
+    $isSetup = $Installer.Name -match "setup|\.msi$"
+    $fileName = if ($isSetup) { $Installer.Name } else { "Rebased_${Version}_x64-setup.exe" }
+    $dest = Join-Path $dir $fileName
+    Copy-Item -Path $Installer.FullName -Destination $dest -Force
+    Write-Host "  已保留本地安装包：$dest"
+    return Get-Item $dest
 }
 
 function Find-Installer([string]$Version) {
@@ -113,7 +132,7 @@ function Publish-Installer([string]$Installer, [string]$Version, [string]$Notes)
         notes      = $Notes
         url        = $feedUrl
         sha256     = $hash
-        silentArgs = "/S"
+        silentArgs = "/S /R"
     }
     $json = ($manifestObj | ConvertTo-Json -Compress)
     $utf8NoBom = New-Object System.Text.UTF8Encoding $false
@@ -148,50 +167,83 @@ function Publish-Installer([string]$Installer, [string]$Version, [string]$Notes)
     Write-Host "清单地址：http://$hostName/rebased/latest.json"
 }
 
-$info = Read-UpdateFile $updateFile
-Write-Host "读取 update.txt：版本 $($info.Version)"
-Write-Host "更新日志："
-Write-Host $info.Notes
-Write-Host ""
-
-Write-Host "1/3 同步项目版本号"
-Sync-ProjectVersion $info.Version
-Write-Host "  已写入 Cargo.toml / tauri.conf.json / package.json -> $($info.Version)"
-
-if (-not $SkipBuild) {
-    Write-Host ""
-    Write-Host "2/3 打包安装包（npm run tauri build）"
-    Push-Location $root
+function Wait-ScriptWindow {
+    if ($NoPause) { return }
+    if (-not [Environment]::UserInteractive) { return }
     try {
-        npm run tauri build
-        if ($LASTEXITCODE -ne 0) {
-            throw "打包失败，退出码 $LASTEXITCODE"
-        }
-    } finally {
-        Pop-Location
+        if ([Console]::IsInputRedirected) { return }
+    } catch {
+        # 控制台不可用时仍尽量停住，避免窗口一闪而过
     }
-} else {
     Write-Host ""
-    Write-Host "2/3 已跳过打包"
+    Write-Host "执行结束。请查看上方输出，按 Enter 后关闭窗口。"
+    try {
+        [void][Console]::ReadLine()
+    } catch {
+        cmd /c pause
+    }
 }
 
-$installer = Find-Installer $info.Version
-if ($installer) {
-    Write-Host "  安装包：$($installer.FullName)"
-} elseif ($SkipPublish) {
-    Write-Host "  尚未生成安装包，已跳过查找"
-} else {
-    throw "未找到版本 $($info.Version) 的安装包，请确认打包成功：src-tauri\target\release\bundle\nsis\"
+$script:exitCode = 0
+try {
+    $info = Read-UpdateFile $updateFile
+    Write-Host "读取 update.txt：版本 $($info.Version)"
+    Write-Host "更新日志："
+    Write-Host $info.Notes
+    Write-Host ""
+
+    Write-Host "1/3 同步项目版本号"
+    Sync-ProjectVersion $info.Version
+    Write-Host "  已写入 Cargo.toml / tauri.conf.json / package.json -> $($info.Version)"
+
+    if (-not $SkipBuild) {
+        Write-Host ""
+        Write-Host "2/3 打包安装包（npm run tauri build）"
+        Push-Location $root
+        try {
+            npm run tauri build
+            if ($LASTEXITCODE -ne 0) {
+                throw "打包失败，退出码 $LASTEXITCODE"
+            }
+        } finally {
+            Pop-Location
+        }
+    } else {
+        Write-Host ""
+        Write-Host "2/3 已跳过打包"
+    }
+
+    $installer = Find-Installer $info.Version
+    if ($installer) {
+        Write-Host "  编译产物：$($installer.FullName)"
+        $installer = Copy-LocalInstaller $installer $info.Version
+    } elseif ($SkipPublish) {
+        Write-Host "  尚未生成安装包，已跳过查找"
+    } else {
+        throw "未找到版本 $($info.Version) 的安装包，请确认打包成功：src-tauri\target\release\bundle\nsis\"
+    }
+
+    if (-not $SkipPublish) {
+        Write-Host ""
+        Write-Host "3/3 发布到更新服务器"
+        Publish-Installer $installer.FullName $info.Version $info.Notes
+    } else {
+        Write-Host ""
+        Write-Host "3/3 已跳过发布"
+    }
+
+    Write-Host ""
+    Write-Host "完成。本地安装包在 release\ 目录，不会随上传删除。"
+    Write-Host "用户将看到版本 $($info.Version) 和 update.txt 中的更新日志。"
+} catch {
+    $script:exitCode = 1
+    Write-Host ""
+    Write-Host "失败：$($_.Exception.Message)" -ForegroundColor Red
+    if ($_.ScriptStackTrace) {
+        Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
+    }
+} finally {
+    Wait-ScriptWindow
 }
 
-if (-not $SkipPublish) {
-    Write-Host ""
-    Write-Host "3/3 发布到更新服务器"
-    Publish-Installer $installer.FullName $info.Version $info.Notes
-} else {
-    Write-Host ""
-    Write-Host "3/3 已跳过发布"
-}
-
-Write-Host ""
-Write-Host "完成。用户将看到版本 $($info.Version) 和 update.txt 中的更新日志。"
+exit $script:exitCode

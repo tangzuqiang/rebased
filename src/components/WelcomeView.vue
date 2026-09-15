@@ -68,7 +68,7 @@ const path = ref("");
   justify-content: center;
   gap: 10px;
   background:
-    radial-gradient(circle at top, #35383d 0%, #2b2d30 45%, #1e1f22 100%);
+    radial-gradient(circle at top, var(--bg-hover) 0%, var(--bg) 45%, var(--bg-deep) 100%);
 }
 
 h1 {
@@ -130,13 +130,13 @@ h2 {
   overflow: auto;
   border: 1px solid var(--border-soft);
   border-radius: 6px;
-  background: #2b2d30;
+  background: var(--bg);
 }
 
 .row {
   display: flex;
   align-items: center;
-  border-bottom: 1px solid #34363a;
+  border-bottom: 1px solid var(--border-soft);
 }
 
 .row:last-child {

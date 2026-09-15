@@ -744,7 +744,7 @@ onUnmounted(() => {
   gap: 10px;
   padding: 12px 16px;
   border-radius: 8px;
-  background: #3c3f41;
+  background: var(--bg-elevated);
   border: 1px solid var(--border);
   color: var(--text);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
@@ -777,7 +777,7 @@ label input:not([type="checkbox"]) {
   max-height: 480px;
   overflow: auto;
   padding: 8px;
-  background: #1e1f22;
+  background: var(--bg-deep);
   font-family: Consolas, "Courier New", monospace;
   font-size: 12px;
   white-space: pre-wrap;

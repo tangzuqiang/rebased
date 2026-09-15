@@ -559,7 +559,7 @@ function checkoutRef(name: string) {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  background: #2b2d30;
+  background: var(--bg);
 }
 
 .log-body {
@@ -622,7 +622,7 @@ function checkoutRef(name: string) {
 }
 
 .row:hover {
-  background: #323437;
+  background: var(--bg-hover);
 }
 
 .row.selected {
@@ -697,7 +697,7 @@ function checkoutRef(name: string) {
   max-height: 520px;
   overflow: auto;
   padding: 8px;
-  background: #1e1f22;
+  background: var(--bg-deep);
   font-family: Consolas, "Courier New", monospace;
   font-size: 12px;
   white-space: pre-wrap;

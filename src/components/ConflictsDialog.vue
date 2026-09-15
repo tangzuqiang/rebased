@@ -206,7 +206,7 @@ function mergeSelected() {
   padding: 0 10px;
   color: var(--text-dim);
   border-bottom: 1px solid var(--border);
-  background: #323437;
+  background: var(--bg-hover);
 }
 
 .body {

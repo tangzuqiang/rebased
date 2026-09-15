@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { appVersion, checkUpdate, getAiConfig, installUpdate, saveAiConfig, testAiConfig } from "../api";
+import { currentTheme, saveTheme, type ThemeName } from "../theme";
 import type { AiConfig, UpdateInfo } from "../types";
 import Modal from "./Modal.vue";
 
@@ -8,9 +9,10 @@ const emit = defineEmits<{
   close: [];
 }>();
 
-type Section = "ai" | "update";
+type Section = "appearance" | "ai" | "update";
 
-const section = ref<Section>("ai");
+const section = ref<Section>("appearance");
+const theme = ref<ThemeName>(currentTheme());
 const config = ref<AiConfig>({
   baseUrl: "",
   apiKey: "",
@@ -28,9 +30,15 @@ const updateHint = ref("");
 const updateHintKind = ref<"ok" | "err">("ok");
 
 onMounted(async () => {
+  theme.value = currentTheme();
   config.value = await getAiConfig().catch(() => config.value);
   version.value = await appVersion().catch(() => "");
 });
+
+async function chooseTheme(next: ThemeName) {
+  theme.value = next;
+  await saveTheme(next).catch(() => undefined);
+}
 
 async function lookupUpdate() {
   checking.value = true;
@@ -51,7 +59,7 @@ async function lookupUpdate() {
 
 async function applyUpdate() {
   installing.value = true;
-  updateHint.value = "正在下载安装包并静默安装，完成后应用会退出…";
+    updateHint.value = "正在下载安装包并静默安装，完成后会自动重新打开…";
   updateHintKind.value = "ok";
   try {
     updateHint.value = await installUpdate();
@@ -103,6 +111,9 @@ async function test() {
     <div class="settings">
       <aside>
         <div class="nav-title">设置列表</div>
+        <button type="button" :class="{ active: section === 'appearance' }" @click="section = 'appearance'">
+          外观
+        </button>
         <button type="button" :class="{ active: section === 'ai' }" @click="section = 'ai'">
           AI 模型配置
         </button>
@@ -110,7 +121,21 @@ async function test() {
           关于与更新
         </button>
       </aside>
-      <section v-if="section === 'ai'" class="panel">
+      <section v-if="section === 'appearance'" class="panel">
+        <h3>主题</h3>
+        <p class="muted">立即生效，并会记住本次选择。</p>
+        <div class="theme-grid">
+          <button type="button" class="theme-card" :class="{ active: theme === 'dark' }" @click="chooseTheme('dark')">
+            <span class="swatch dark" />
+            <span>黑色</span>
+          </button>
+          <button type="button" class="theme-card" :class="{ active: theme === 'light' }" @click="chooseTheme('light')">
+            <span class="swatch light" />
+            <span>白色</span>
+          </button>
+        </div>
+      </section>
+      <section v-else-if="section === 'ai'" class="panel">
         <h3>AI 模型配置</h3>
         <p class="muted">用于提交弹窗中的「AI 生成提交信息」。接口需兼容 OpenAI Chat Completions。</p>
         <label>
@@ -221,9 +246,46 @@ input:focus {
   border-color: var(--accent);
 }
 
+.theme-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.theme-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg-input);
+}
+
+.theme-card.active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.swatch {
+  width: 100%;
+  height: 56px;
+  border-radius: 6px;
+  border: 1px solid var(--border-soft);
+}
+
+.swatch.dark {
+  background: linear-gradient(180deg, #2b2d30 0%, #1e1f22 100%);
+}
+
+.swatch.light {
+  background: linear-gradient(180deg, #ffffff 0%, #f2f3f5 100%);
+}
+
 .hint {
   margin: 0;
-  color: #98c379;
+  color: var(--ok);
 }
 
 .hint.err {

@@ -173,7 +173,7 @@ function groupChecked(kind: "local" | "remote" | "tag") {
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  background: #2b2d30;
+  background: var(--bg);
 }
 
 .search {
@@ -234,7 +234,7 @@ function groupChecked(kind: "local" | "remote" | "tag") {
 }
 
 .current {
-  color: #7cb7ff;
+  color: var(--link);
 }
 
 .folded {

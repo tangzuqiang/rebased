@@ -5,6 +5,7 @@ import "@xterm/xterm/css/xterm.css";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { closeTerminal, resizeTerminal, startTerminal, writeTerminal } from "../api";
+import { currentTheme, terminalTheme, type ThemeName } from "../theme";
 
 const props = defineProps<{
   id: string;
@@ -58,8 +59,14 @@ async function ensureSession() {
   }
 }
 
+function onTheme(event: Event) {
+  const theme = (event as CustomEvent<ThemeName>).detail || currentTheme();
+  term?.options && (term.options.theme = terminalTheme(theme));
+}
+
 onMounted(async () => {
   window.addEventListener("resize", applySize);
+  window.addEventListener("rebased-theme", onTheme);
   term = new Terminal({
     cols: 80,
     rows: 24,
@@ -68,12 +75,7 @@ onMounted(async () => {
     cursorBlink: true,
     scrollback: 4000,
     windowsPty: { backend: "conpty", buildNumber: 22621 },
-    theme: {
-      background: "#1e1f22",
-      foreground: "#dfe1e5",
-      cursor: "#dfe1e5",
-      selectionBackground: "#2e436e",
-    },
+    theme: terminalTheme(),
   });
   fit = new FitAddon();
   term.loadAddon(fit);
@@ -104,6 +106,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener("resize", applySize);
+  window.removeEventListener("rebased-theme", onTheme);
   unlistenData?.();
   unlistenExit?.();
   term?.dispose();

@@ -129,7 +129,7 @@ onUnmounted(() => {
             <Icons name="close" :size="10" />
           </span>
         </button>
-        <button type="button" class="icon-btn add" title="新建终端" @click="addTab">
+        <button type="button" class="icon-btn add" title="新建终端" @click="addTab()">
           <Icons name="plus" :size="12" />
         </button>
       </div>
@@ -158,7 +158,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--border);
-  background: #1e1f22;
+  background: var(--bg-deep);
 }
 
 header {
@@ -169,7 +169,7 @@ header {
   gap: 8px;
   cursor: ns-resize;
   border-bottom: 1px solid var(--border);
-  background: #2b2d30;
+  background: var(--bg);
 }
 
 .tabs {
@@ -197,7 +197,7 @@ header {
 
 .tab.active {
   color: var(--text);
-  background: #1e1f22;
+  background: var(--bg-deep);
 }
 
 .tab:hover {

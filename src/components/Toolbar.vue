@@ -185,7 +185,7 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branc
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--border);
-  background: #2b2d30;
+  background: var(--bg);
   overflow: visible;
 }
 
@@ -212,7 +212,7 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branc
 }
 
 .combo.busy {
-  color: #7cb7ff;
+  color: var(--link);
   cursor: wait;
 }
 
@@ -230,7 +230,7 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branc
 }
 
 .dirty {
-  color: #c9a227;
+  color: var(--renamed);
   font-weight: 700;
 }
 
@@ -247,6 +247,6 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branc
 }
 
 .current {
-  color: #7cb7ff;
+  color: var(--link);
 }
 </style>

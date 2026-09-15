@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 scripts/.update-server.env
+release/
 
 # Editor directories and files
 .vscode/*

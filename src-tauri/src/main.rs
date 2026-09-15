@@ -26,7 +26,9 @@ fn apply_silent_self_install() -> bool {
     let dest = dest_dir.join("rebased.exe");
     for _ in 0..8 {
         if std::fs::copy(&src, &dest).is_ok() {
-            let _ = std::process::Command::new(&dest).spawn();
+            let _ = std::process::Command::new("cmd")
+                .args(["/C", "start", "", &dest.to_string_lossy()])
+                .spawn();
             return true;
         }
         std::thread::sleep(std::time::Duration::from_millis(400));

@@ -54,7 +54,7 @@ const emit = defineEmits<{
   flex: none;
   display: flex;
   align-items: stretch;
-  background: #1e1f22;
+  background: var(--bg-tabbar);
   border-bottom: 1px solid var(--border);
 }
 
@@ -78,17 +78,19 @@ const emit = defineEmits<{
   height: 100%;
   padding: 0 8px 0 12px;
   color: var(--text-muted);
-  border-right: 1px solid #2b2d30;
+  border-right: 1px solid var(--border);
 }
 
-.tab:hover,
+.tab:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
 .tab.active {
   color: var(--text);
-  background: #2b2d30;
-}
-
-.tab.active {
-  box-shadow: inset 0 2px 0 var(--accent);
+  background: var(--bg-tab-active);
+  font-weight: 600;
+  box-shadow: inset 0 3px 0 var(--accent);
 }
 
 .tab.merging {
@@ -108,8 +110,12 @@ const emit = defineEmits<{
   font-style: normal;
 }
 
+.tab.active .label em {
+  color: var(--text-muted);
+}
+
 .dirty {
-  color: #c9a227;
+  color: var(--renamed);
   font-weight: 700;
 }
 
