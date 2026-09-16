@@ -3,6 +3,7 @@ mod git;
 mod store;
 mod term;
 mod updater;
+mod watch;
 
 use git::{
     AppState, BranchInfo, FileDiff, FilePreview, GitCommit, GitFile, MergeCompare, MergeFileContent,
@@ -578,6 +579,16 @@ fn app_version() -> String {
     updater::current_version()
 }
 
+#[tauri::command]
+fn watch_repo(app: AppHandle, hub: State<watch::WatchHub>, path: String) -> Result<(), String> {
+    watch::watch_repo(&hub, app, path)
+}
+
+#[tauri::command]
+fn unwatch_repo(hub: State<watch::WatchHub>, path: String) -> Result<(), String> {
+    watch::unwatch_repo(&hub, path)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -586,6 +597,7 @@ pub fn run() {
         .manage(AppState::new())
         .manage(AppStore::open())
         .manage(term::TerminalHub::new())
+        .manage(watch::WatchHub::default())
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 let title = format!("Rebased {}", updater::current_version());
@@ -663,7 +675,9 @@ pub fn run() {
             close_terminal,
             check_update,
             install_update,
-            app_version
+            app_version,
+            watch_repo,
+            unwatch_repo
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

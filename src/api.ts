@@ -324,3 +324,11 @@ export function installUpdate() {
 export function appVersion() {
   return invoke<string>("app_version");
 }
+
+export function watchRepo(path: string) {
+  return invoke<void>("watch_repo", { path });
+}
+
+export function unwatchRepo(path: string) {
+  return invoke<void>("unwatch_repo", { path });
+}

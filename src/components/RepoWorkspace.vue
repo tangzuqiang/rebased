@@ -20,12 +20,16 @@ import {
   renameBranch,
   resolveConflict,
   setUpstream,
+  unwatchRepo,
   updateBranch,
+  watchRepo,
   workingTreeDiff,
   writeResolved,
 } from "../api";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { buildGraph } from "../graph";
 import { notify } from "../notify";
+import { sameRepo } from "../path";
 import type { BranchMenuAction } from "./BranchFilterList.vue";
 import type { BranchInfo, FileDiff, GitCommit, GitFile, MergeState, RecentProject, RepoInfo } from "../types";
 import CommitDialog from "./CommitDialog.vue";
@@ -96,6 +100,9 @@ const actionErrorTitle = ref("操作失败");
 
 const graph = computed(() => buildGraph(commits.value));
 const repoPath = computed(() => repo.value?.path ?? props.path);
+const fsDirty = ref(false);
+const watchingPath = ref("");
+const isDirty = computed(() => fsDirty.value || changes.value.length + unversioned.value.length > 0);
 
 function emitMeta() {
   if (!repo.value) return;
@@ -103,9 +110,15 @@ function emitMeta() {
     path: repo.value.path,
     name: repo.value.name,
     branch: repo.value.branch,
-    dirty: changes.value.length + unversioned.value.length > 0,
+    dirty: isDirty.value,
     merging: Boolean(conflictState.value?.inProgress),
   });
+}
+
+function markFsDirty() {
+  if (fsDirty.value) return;
+  fsDirty.value = true;
+  emitMeta();
 }
 
 async function withBusy<T>(
@@ -150,6 +163,7 @@ async function refreshCore() {
   if (statusResult.status === "fulfilled") {
     changes.value = statusResult.value.changes;
     unversioned.value = statusResult.value.unversioned;
+    fsDirty.value = false;
   } else {
     errors.push(String(statusResult.reason));
   }
@@ -235,6 +249,8 @@ async function bootstrap(openConflicts = false) {
       await syncMergeState(true);
     }
     loaded.value = true;
+    watchingPath.value = opened.path;
+    void watchRepo(opened.path).catch(() => undefined);
     emitMeta();
     return opened;
   });
@@ -249,7 +265,14 @@ async function refreshStatus() {
   if (!status) return;
   changes.value = status.changes;
   unversioned.value = status.unversioned;
+  fsDirty.value = false;
   emitMeta();
+}
+
+async function openCommit(amend = false) {
+  startAmend.value = amend;
+  await refreshStatus();
+  showCommit.value = true;
 }
 
 async function handleRefsChange(refs: string[]) {
@@ -268,8 +291,7 @@ async function handleLogChanged(message?: string) {
 }
 
 function openAmend() {
-  startAmend.value = true;
-  showCommit.value = true;
+  void openCommit(true);
 }
 
 async function handleSelect(hash: string) {
@@ -610,8 +632,17 @@ watch(
   },
 );
 
+let stopWatch: UnlistenFn | undefined;
+
 onMounted(() => {
   window.addEventListener("keydown", onGlobalKey, true);
+  void listen<{ path: string }>("workdir-changed", (event) => {
+    if (sameRepo(event.payload.path, repoPath.value || props.path)) {
+      markFsDirty();
+    }
+  }).then((unlisten) => {
+    stopWatch = unlisten;
+  });
   if (props.active) {
     void bootstrap(true);
   }
@@ -619,6 +650,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener("keydown", onGlobalKey, true);
+  stopWatch?.();
+  void unwatchRepo(watchingPath.value || props.path);
 });
 </script>
 
@@ -629,7 +662,7 @@ onUnmounted(() => {
         :repo="repo"
         :branches="branches"
         :busy="busy"
-        :dirty="changes.length + unversioned.length > 0"
+        :dirty="isDirty"
         :merging="Boolean(conflictState?.inProgress)"
         :recent="recent"
         :version="version"
@@ -643,7 +676,7 @@ onUnmounted(() => {
         @open-path="emit('openPath', $event)"
         @fetch="handleFetch"
         @pull="handlePull"
-        @commit="showCommit = true"
+        @commit="openCommit()"
         @push="showPush = true"
         @merge="showMerge = true"
         @new-branch="openNewBranchFromCurrent"
@@ -655,7 +688,7 @@ onUnmounted(() => {
         v-if="showFiles"
         :repo-path="repoPath"
         @close="showFiles = false"
-        @changed="refreshStatus"
+        @changed="markFsDirty"
         @open-terminal="openTerminalAt"
       />
       <main v-else class="workspace">
@@ -665,7 +698,7 @@ onUnmounted(() => {
           :graph="graph"
           :selected-hash="selectedHash"
           :branches="branches"
-          :dirty="changes.length + unversioned.length > 0"
+          :dirty="isDirty"
           :busy="busy"
           :log-loading="logLoading"
           @select="handleSelect"
