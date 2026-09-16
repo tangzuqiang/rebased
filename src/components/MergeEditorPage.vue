@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from "vue";
 import { getConflictFile } from "../api";
 import { alignDiff3 } from "../diff3";
+import { commentPrefix, findInTextarea, handleIdeEditorKey, writeTextarea } from "../editorKeys";
 import { notify } from "../notify";
 import type { BlameLine, Diff3Row, DiffKind, MergeFileContent, MergeState } from "../types";
 import Icons from "./Icons.vue";
@@ -48,6 +49,10 @@ const resultPane = ref<HTMLElement | null>(null);
 const theirsPane = ref<HTMLElement | null>(null);
 const leftGutter = ref<HTMLElement | null>(null);
 const rightGutter = ref<HTMLElement | null>(null);
+const resultEditor = ref<HTMLTextAreaElement | null>(null);
+const findOpen = ref(false);
+const findQuery = ref("");
+const findHint = ref("");
 
 const rows = computed<Diff3Row[]>(() => {
   if (!content.value || content.value.binary) return [];
@@ -97,18 +102,6 @@ const canGoDown = computed(() => unresolvedConflicts.value.some((hunk) => hunk.s
 const nonConflictCount = computed(() => hunks.value.filter((hunk) => !hunk.conflict && !hunkDone(hunk)).length);
 const oursNos = computed(() => numberSide(rows.value, (row) => row.oursKind));
 const theirsNos = computed(() => numberSide(rows.value, (row) => row.theirsKind));
-const resultNos = computed(() => {
-  const numbers: Array<number | ""> = [];
-  let line = 0;
-  for (const text of resultLines.value) {
-    if (text === null) numbers.push("");
-    else {
-      line += 1;
-      numbers.push(line);
-    }
-  }
-  return numbers;
-});
 
 watch(
   () => props.path,
@@ -126,6 +119,10 @@ watch([() => content.value?.path, ignoreWhitespace], () => {
   completeOpen.value = false;
   completeShown.value = false;
   overwrite.value = "";
+});
+
+watch(resultEditor, (el) => {
+  if (el) writeTextarea(el, result.value);
 });
 
 async function loadFile(path: string) {
@@ -187,7 +184,7 @@ function seedResult() {
   resultLines.value = rows.value.map(defaultResultLine);
   choice.value = {};
   settled.value = {};
-  result.value = joinResult(resultLines.value);
+  setResultText(joinResult(resultLines.value));
 }
 
 function markComplete() {
@@ -239,6 +236,7 @@ function hunkOf(index: number) {
 }
 
 function applyHunk(hunk: Hunk, side: "ours" | "theirs" | "base") {
+  syncLinesFromResult();
   const source = rows.value;
   const next = source.map((row, index) => resultLines.value[index] ?? defaultResultLine(row));
   for (let index = hunk.start; index < hunk.end; index += 1) {
@@ -246,14 +244,36 @@ function applyHunk(hunk: Hunk, side: "ours" | "theirs" | "base") {
   }
   resultLines.value = next;
   choice.value = { ...choice.value, [hunkKey(hunk)]: side };
-  result.value = joinResult(next);
+  setResultText(joinResult(next));
   currentHunk.value = Math.max(0, hunks.value.findIndex((item) => item.start === hunk.start));
   checkConflictsResolved();
 }
 
+function setResultText(text: string) {
+  result.value = text;
+  writeTextarea(resultEditor.value, text);
+}
+
+function syncLinesFromResult() {
+  const visual = result.value.split("\n");
+  let offset = 0;
+  resultLines.value = resultLines.value.map((line) => {
+    if (line === null) return null;
+    const value = visual[offset] ?? line;
+    offset += 1;
+    return value;
+  });
+}
+
+function onResultInput(event: Event) {
+  const target = event.target;
+  if (!(target instanceof HTMLTextAreaElement)) return;
+  result.value = target.value;
+}
+
 function acceptHunk(hunk: Hunk, side: "ours" | "theirs") {
   applyHunk(hunk, side);
-  markSettled(hunk, { ours: true, theirs: true });
+  markSettled(hunk, { [side]: true });
   checkConflictsResolved();
 }
 
@@ -305,17 +325,6 @@ function sideKind(index: number, side: "ours" | "theirs"): string {
   return raw;
 }
 
-function resultKind(index: number): DiffKind {
-  const row = rows.value[index];
-  const hunk = hunkOf(index);
-  if (!hunk) return "same";
-  const picked = choice.value[hunkKey(hunk)];
-  if (picked === "theirs") return soften(row.theirsKind === "same" ? "changed" : row.theirsKind);
-  if (picked === "base") return resultLines.value[index] === null ? "deleted" : "changed";
-  if (picked === "ours") return soften(row.oursKind === "same" ? "changed" : row.oursKind);
-  return hunk.conflict ? "conflict" : row.oursKind;
-}
-
 function formatBlame(meta?: BlameLine) {
   if (!meta?.author) return "";
   const time = meta.timestamp
@@ -332,23 +341,12 @@ function blameDateAuthor(meta?: BlameLine) {
   return date ? `${date} ${meta.author}` : meta.author;
 }
 
-function resultBlame(index: number) {
+function blameMeta(index: number, side: "ours" | "theirs") {
   const row = rows.value[index];
-  const hunk = hunkOf(index);
-  const picked = hunk ? choice.value[hunkKey(hunk)] : undefined;
-  if (picked === "theirs") return row.theirsBlame;
-  if (picked === "base") return row.baseBlame;
-  return row.oursBlame;
+  return side === "ours" ? row.oursBlame : row.theirsBlame;
 }
 
-function blameMeta(index: number, side: "ours" | "theirs" | "result") {
-  const row = rows.value[index];
-  if (side === "ours") return row.oursBlame;
-  if (side === "theirs") return row.theirsBlame;
-  return resultBlame(index);
-}
-
-function blameAnno(index: number, side: "ours" | "theirs" | "result") {
+function blameAnno(index: number, side: "ours" | "theirs") {
   if (!showBlame.value) return "";
   const label = blameDateAuthor(blameMeta(index, side));
   if (!label) return "";
@@ -426,6 +424,33 @@ function coverAll(side: "ours" | "theirs") {
 function applyCurrent() {
   if (conflictCount.value > 0 || !content.value || content.value.binary) return;
   emit("save", { path: props.path, content: result.value });
+}
+
+function runFind(reverse = false) {
+  const el = resultEditor.value;
+  if (!el || !findQuery.value) return;
+  findHint.value = findInTextarea(el, findQuery.value, reverse) ? "" : "未找到";
+}
+
+function onResultKey(event: KeyboardEvent) {
+  if (event.key === "Escape" && findOpen.value) {
+    event.preventDefault();
+    findOpen.value = false;
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key === "F3") {
+    event.preventDefault();
+    runFind(event.shiftKey);
+    return;
+  }
+  handleIdeEditorKey(event, {
+    onSave: applyCurrent,
+    onFind: () => {
+      findOpen.value = true;
+      findHint.value = "";
+    },
+    commentPrefix: commentPrefix(props.path),
+  });
 }
 
 function cancelMerge() {
@@ -525,18 +550,29 @@ function cancelMerge() {
         </section>
 
         <section class="col">
-          <div class="pane-head result">结果</div>
-          <div ref="resultPane" class="pane scroll" @scroll="syncScroll">
-            <div
-              v-for="(_row, index) in rows"
-              :key="`r-${index}`"
-              class="line"
-              :class="[resultKind(index), { current: hunkOf(index)?.start === hunks[currentHunk]?.start }]"
-            >
-              <span class="no">{{ resultNos[index] }}</span>
-              <span v-if="showBlame" class="blame" :title="formatBlame(resultBlame(index))">{{ blameAnno(index, 'result') }}</span>
-              <span class="code">{{ resultLines[index] ?? "" }}</span>
-            </div>
+          <div class="pane-head result">
+            <span>结果</span>
+            <span v-if="findOpen" class="findbar">
+              <input
+                v-model="findQuery"
+                placeholder="查找"
+                @keydown.enter.prevent="runFind($event.shiftKey)"
+                @keydown.escape.prevent="findOpen = false"
+              />
+              <button type="button" title="上一个" @click="runFind(true)">↑</button>
+              <button type="button" title="下一个" @click="runFind(false)">↓</button>
+              <em v-if="findHint">{{ findHint }}</em>
+            </span>
+          </div>
+          <div ref="resultPane" class="pane scroll result-pane" @scroll="syncScroll">
+            <textarea
+              ref="resultEditor"
+              class="result-editor"
+              spellcheck="false"
+              :style="{ minHeight: `${Math.max(rows.length, result.split('\n').length) * 18}px` }"
+              @input="onResultInput"
+              @keydown="onResultKey"
+            />
           </div>
         </section>
 
@@ -710,7 +746,62 @@ function cancelMerge() {
 }
 
 .pane-head.ours { background: var(--diff-ours-head); }
-.pane-head.result { background: var(--diff-base-head); }
+.pane-head.result {
+  background: var(--diff-base-head);
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.findbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.findbar input {
+  width: 140px;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: var(--bg-input);
+  color: var(--text);
+}
+
+.findbar button {
+  height: 20px;
+  min-width: 20px;
+  color: var(--text-muted);
+}
+
+.findbar em {
+  color: var(--danger);
+  font-style: normal;
+}
+
+.result-pane {
+  padding: 0;
+}
+
+.result-editor {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+  padding: 0 8px;
+  border: 0;
+  outline: none;
+  resize: none;
+  overflow: hidden;
+  color: var(--text-editor);
+  background: transparent;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: pre;
+  tab-size: 4;
+}
 .pane-head.theirs { background: var(--diff-theirs-head); }
 
 .pane,

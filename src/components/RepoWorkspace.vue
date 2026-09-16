@@ -10,6 +10,7 @@ import {
   getLog,
   getRecentBranches,
   getMergeState,
+  getRepo,
   getStatus,
   mergeAbort,
   mergeBranch,
@@ -121,6 +122,39 @@ function markFsDirty() {
   emitMeta();
 }
 
+let watchTimer = 0;
+let pendingWatch: "worktree" | "git" | "" = "";
+
+function scheduleGitRefresh(kind: "worktree" | "git") {
+  if (kind === "git") pendingWatch = "git";
+  else if (!pendingWatch) pendingWatch = "worktree";
+  window.clearTimeout(watchTimer);
+  watchTimer = window.setTimeout(() => {
+    void applyGitRefresh();
+  }, 400);
+}
+
+async function applyGitRefresh() {
+  const kind = pendingWatch;
+  pendingWatch = "";
+  if (!kind || !repo.value) return;
+  if (busy.value) {
+    pendingWatch = kind;
+    return;
+  }
+  if (kind === "worktree") {
+    await refreshStatus();
+    return;
+  }
+  await refreshAll();
+}
+
+function onWindowResume() {
+  if (document.visibilityState === "hidden") return;
+  if (!loaded.value || busy.value) return;
+  scheduleGitRefresh("git");
+}
+
 async function withBusy<T>(
   label: string,
   task: () => Promise<T>,
@@ -155,9 +189,10 @@ async function refreshCore() {
   if (!repo.value) return;
   const current = repoPath.value;
   const errors: string[] = [];
-  const [statusResult, recentResult] = await Promise.allSettled([
+  const [statusResult, recentResult, repoResult] = await Promise.allSettled([
     getStatus(current),
     getRecentBranches(current, 4),
+    getRepo(current),
   ]);
 
   if (statusResult.status === "fulfilled") {
@@ -170,6 +205,10 @@ async function refreshCore() {
 
   if (recentResult.status === "fulfilled") {
     recentBranches.value = recentResult.value.slice(0, 4);
+  }
+
+  if (repoResult.status === "fulfilled" && current === repoPath.value) {
+    repo.value = repoResult.value;
   }
 
   await syncMergeState(false);
@@ -623,11 +662,19 @@ function onGlobalKey(event: KeyboardEvent) {
   }
 }
 
+watch(busy, (value) => {
+  if (!value && pendingWatch) {
+    scheduleGitRefresh(pendingWatch);
+  }
+});
+
 watch(
   () => props.active,
   (active) => {
     if (active && !loaded.value) {
       void bootstrap(true);
+    } else if (active && loaded.value) {
+      scheduleGitRefresh("git");
     }
   },
 );
@@ -636,10 +683,17 @@ let stopWatch: UnlistenFn | undefined;
 
 onMounted(() => {
   window.addEventListener("keydown", onGlobalKey, true);
-  void listen<{ path: string }>("workdir-changed", (event) => {
-    if (sameRepo(event.payload.path, repoPath.value || props.path)) {
-      markFsDirty();
+  window.addEventListener("focus", onWindowResume);
+  document.addEventListener("visibilitychange", onWindowResume);
+  void listen<{ path: string; kind?: string }>("workdir-changed", (event) => {
+    if (!sameRepo(event.payload.path, repoPath.value || props.path)) return;
+    const kind = event.payload.kind === "git" ? "git" : "worktree";
+    if (kind === "worktree") markFsDirty();
+    if (busy.value) {
+      pendingWatch = kind === "git" || pendingWatch === "git" ? "git" : "worktree";
+      return;
     }
+    scheduleGitRefresh(kind);
   }).then((unlisten) => {
     stopWatch = unlisten;
   });
@@ -650,6 +704,9 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener("keydown", onGlobalKey, true);
+  window.removeEventListener("focus", onWindowResume);
+  document.removeEventListener("visibilitychange", onWindowResume);
+  window.clearTimeout(watchTimer);
   stopWatch?.();
   void unwatchRepo(watchingPath.value || props.path);
 });
@@ -688,7 +745,7 @@ onUnmounted(() => {
         v-if="showFiles"
         :repo-path="repoPath"
         @close="showFiles = false"
-        @changed="markFsDirty"
+        @changed="() => { markFsDirty(); scheduleGitRefresh('worktree'); }"
         @open-terminal="openTerminalAt"
       />
       <main v-else class="workspace">

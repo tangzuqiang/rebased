@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import "highlight.js/styles/atom-one-dark.css";
 import { absWorktreePath, listWorktree, openInOs, previewFile, revealInOs, saveWorktreeFile } from "../api";
+import { commentPrefix, findInTextarea, handleIdeEditorKey, writeTextarea } from "../editorKeys";
 import { languageFromPath } from "../highlight";
 import { notify } from "../notify";
 import type { FilePreview } from "../types";
@@ -52,6 +53,10 @@ const menu = ref<{
   subLeft: false,
 });
 const pathWindow = ref("");
+const editorEl = ref<HTMLTextAreaElement | null>(null);
+const findOpen = ref(false);
+const findQuery = ref("");
+const findHint = ref("");
 
 const visible = computed(() => flatten(tree.value, query.value.trim().toLowerCase(), expanded.value));
 const lineCount = computed(() => (draft.value ? draft.value.split("\n").length : 0));
@@ -60,18 +65,22 @@ const dirty = computed(() => editable.value && draft.value !== savedContent.valu
 
 function buildTree(paths: string[]) {
   const root: TreeNode[] = [];
-  for (const path of paths) {
-    const parts = path.split("/").filter(Boolean);
+  for (const raw of paths) {
+    const isDirPath = raw.endsWith("/") || raw.endsWith("\\");
+    const parts = raw.replace(/\\/g, "/").replace(/\/+$/, "").split("/").filter(Boolean);
+    if (!parts.length) continue;
     let level = root;
     let acc = "";
     for (let i = 0; i < parts.length; i++) {
       const name = parts[i];
       acc = acc ? `${acc}/${name}` : name;
-      const dir = i < parts.length - 1;
+      const dir = isDirPath || i < parts.length - 1;
       let node = level.find((item) => item.name === name && item.dir === dir);
       if (!node) {
         node = { name, path: acc, dir, children: dir ? [] : undefined };
         level.push(node);
+      } else if (dir) {
+        node.children ??= [];
       }
       if (dir) level = node.children!;
     }
@@ -137,6 +146,14 @@ function applyPreview(result: FilePreview) {
   preview.value = result;
   draft.value = result.binary ? "" : result.content;
   savedContent.value = draft.value;
+  void nextTick(() => writeTextarea(editorEl.value, draft.value));
+}
+
+function onDraftInput(event: Event) {
+  const target = event.target;
+  if (target instanceof HTMLTextAreaElement) {
+    draft.value = target.value;
+  }
 }
 
 async function openFile(path: string) {
@@ -156,6 +173,8 @@ async function openFile(path: string) {
     previewError.value = error instanceof Error ? error.message : String(error);
   } finally {
     loadingPreview.value = false;
+    await nextTick();
+    writeTextarea(editorEl.value, draft.value);
   }
 }
 
@@ -264,11 +283,32 @@ async function openInTerminal() {
   emit("openTerminal", cwd || props.repoPath);
 }
 
+function runFind(reverse = false) {
+  const el = editorEl.value;
+  if (!el || !findQuery.value) return;
+  findHint.value = findInTextarea(el, findQuery.value, reverse) ? "" : "未找到";
+}
+
 function onEditorKey(event: KeyboardEvent) {
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+  if (event.key === "Escape" && findOpen.value) {
     event.preventDefault();
-    void saveFile();
+    findOpen.value = false;
+    findHint.value = "";
+    return;
   }
+  if ((event.ctrlKey || event.metaKey) && event.key === "F3") {
+    event.preventDefault();
+    runFind(event.shiftKey);
+    return;
+  }
+  handleIdeEditorKey(event, {
+    onSave: () => void saveFile(),
+    onFind: () => {
+      findOpen.value = true;
+      findHint.value = "";
+    },
+    commentPrefix: commentPrefix(selected.value),
+  });
 }
 
 function onGlobalKey(event: KeyboardEvent) {
@@ -297,6 +337,10 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener("keydown", onGlobalKey, true);
+});
+
+watch(editorEl, (el) => {
+  if (el) writeTextarea(el, draft.value);
 });
 
 watch(
@@ -380,12 +424,28 @@ watch(
           <template v-else>
             <p v-if="preview?.truncated" class="warn">文件较大，仅预览前 512 KB，不能在此编辑</p>
             <p v-if="previewError" class="warn">{{ previewError }}</p>
+            <div v-if="findOpen" class="findbar">
+              <input
+                v-model="findQuery"
+                placeholder="查找"
+                autofocus
+                @keydown.enter.prevent="runFind($event.shiftKey)"
+                @keydown.escape.prevent="findOpen = false"
+              />
+              <button type="button" title="上一个" @click="runFind(true)">↑</button>
+              <button type="button" title="下一个" @click="runFind(false)">↓</button>
+              <span v-if="findHint" class="find-miss">{{ findHint }}</span>
+              <button type="button" class="icon-btn" title="关闭" @click="findOpen = false">
+                <Icons name="close" :size="12" />
+              </button>
+            </div>
             <textarea
-              v-model="draft"
+              ref="editorEl"
               class="editor"
               spellcheck="false"
               :readonly="!editable"
               :placeholder="editable ? '在此编辑文件内容，Ctrl+S 保存' : ''"
+              @input="onDraftInput"
               @keydown="onEditorKey"
             />
           </template>
@@ -530,6 +590,44 @@ header {
   display: flex;
   flex-direction: column;
   background: var(--bg-editor);
+}
+
+.findbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-hover);
+}
+
+.findbar input {
+  width: 220px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: var(--bg-input);
+  color: var(--text);
+}
+
+.findbar button {
+  height: 22px;
+  min-width: 22px;
+  padding: 0 6px;
+  border-radius: 4px;
+  color: var(--text-muted);
+}
+
+.findbar button:hover {
+  background: var(--bg-selected);
+  color: var(--text);
+}
+
+.find-miss {
+  color: var(--danger);
 }
 
 .row {

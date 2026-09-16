@@ -17,17 +17,50 @@ fn watch_key(path: &str) -> String {
     path.replace('\\', "/").trim_end_matches('/').to_lowercase()
 }
 
-fn ignored(path: &Path) -> bool {
-    path.components().any(|component| match component {
-        Component::Normal(name) => matches!(
-            name.to_str(),
-            Some(
-                ".git" | "node_modules" | "target" | "dist" | ".idea" | ".vscode"
-                    | "__pycache__" | ".next" | "vendor" | ".cache"
-            )
-        ),
-        _ => false,
-    })
+fn skip_worktree(name: &str) -> bool {
+    matches!(
+        name,
+        "node_modules"
+            | "target"
+            | "dist"
+            | ".idea"
+            | ".vscode"
+            | "__pycache__"
+            | ".next"
+            | "vendor"
+            | ".cache"
+    )
+}
+
+fn skip_git(name: &str) -> bool {
+    matches!(name, "objects" | "logs" | "hooks" | "info" | "modules" | "rr-cache")
+}
+
+fn classify(path: &Path) -> Option<&'static str> {
+    let names: Vec<&str> = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .collect();
+    if names.iter().any(|name| name.ends_with(".lock")) {
+        return None;
+    }
+    if let Some(index) = names.iter().position(|name| name.eq_ignore_ascii_case(".git")) {
+        let rest = names.get(index + 1).copied().unwrap_or("");
+        if rest.is_empty() {
+            return Some("git");
+        }
+        if skip_git(rest) {
+            return None;
+        }
+        return Some("git");
+    }
+    if names.iter().copied().any(skip_worktree) {
+        return None;
+    }
+    Some("worktree")
 }
 
 fn interesting(kind: &EventKind) -> bool {
@@ -44,6 +77,7 @@ fn interesting(kind: &EventKind) -> bool {
 #[serde(rename_all = "camelCase")]
 struct WorkdirChanged {
     path: String,
+    kind: &'static str,
 }
 
 pub fn watch_repo(hub: &WatchHub, app: AppHandle, path: String) -> Result<(), String> {
@@ -60,13 +94,25 @@ pub fn watch_repo(hub: &WatchHub, app: AppHandle, path: String) -> Result<(), St
         if !interesting(&event.kind) {
             return;
         }
-        if event.paths.iter().all(|item| ignored(item)) {
-            return;
+        let mut kind = None;
+        for item in &event.paths {
+            match classify(item) {
+                Some("git") => {
+                    kind = Some("git");
+                    break;
+                }
+                Some(value) => kind = Some(value),
+                None => {}
+            }
         }
+        let Some(kind) = kind else {
+            return;
+        };
         let _ = app.emit(
             "workdir-changed",
             WorkdirChanged {
                 path: emit_path.clone(),
+                kind,
             },
         );
     })

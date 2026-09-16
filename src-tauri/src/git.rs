@@ -1451,15 +1451,51 @@ fn resolve_worktree_file(repo: &Path, rel: &str) -> Result<(String, PathBuf), St
 }
 
 pub fn list_worktree(repo: &Path) -> Result<Vec<String>, String> {
-    let raw = run_git(repo, &["ls-files", "-co", "--exclude-standard", "-z"])?;
-    let mut files: Vec<String> = raw
-        .split('\0')
-        .map(|item| item.trim().replace('\\', "/"))
-        .filter(|item| !item.is_empty())
-        .collect();
-    files.sort();
-    files.dedup();
-    Ok(files)
+    let root = repo
+        .canonicalize()
+        .map_err(|e| format!("无法解析仓库路径：{e}"))?;
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![root.clone()];
+    seen.insert(root.clone());
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.eq_ignore_ascii_case(".git") {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(rel) = path.strip_prefix(&root) else {
+                continue;
+            };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if rel.is_empty() {
+                continue;
+            }
+            let ft = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if ft.is_dir() && !ft.is_symlink() {
+                if let Ok(canon) = path.canonicalize() {
+                    if !seen.insert(canon) {
+                        continue;
+                    }
+                }
+                out.push(format!("{rel}/"));
+                stack.push(path);
+            } else {
+                out.push(rel);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
 }
 
 fn os_display_path(path: &Path) -> String {
