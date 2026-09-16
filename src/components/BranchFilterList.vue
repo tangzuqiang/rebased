@@ -10,7 +10,10 @@ export type BranchMenuAction =
   | "update"
   | "push"
   | "track"
-  | "rename";
+  | "rename"
+  | "delete"
+  | "push-tag"
+  | "delete-tag";
 
 type GroupKey = "recent" | "local" | "remote" | "tag";
 
@@ -109,18 +112,21 @@ function upstreamOf(branch: BranchInfo) {
 
 const highlighted = ref("");
 
-function onLeafClick(_event: MouseEvent, branch: BranchInfo) {
-  highlighted.value = branch.name;
+function onLeafClick(event: MouseEvent, branch: BranchInfo, group: string) {
+  highlighted.value = `${group}:${branch.name}`;
   if (props.enableActions) {
+    event.preventDefault();
+    event.stopPropagation();
+    menu.value = { open: true, x: event.clientX, y: event.clientY, branch };
     return;
   }
   emit("select", branch.name);
 }
 
-function openMenu(event: MouseEvent, branch: BranchInfo) {
+function openMenu(event: MouseEvent, branch: BranchInfo, group: string) {
   event.preventDefault();
   event.stopPropagation();
-  highlighted.value = branch.name;
+  highlighted.value = `${group}:${branch.name}`;
   menu.value = { open: true, x: event.clientX, y: event.clientY, branch };
 }
 
@@ -168,10 +174,10 @@ defineExpose({
             :key="`recent:${branch.name}`"
             type="button"
             class="leaf"
-            :class="{ current: branch.current, selected: branch.name === (highlighted || selected) }"
+            :class="{ current: branch.current, selected: branch.name === selected || `recent:${branch.name}` === highlighted }"
             :title="branch.name"
-            @click="onLeafClick($event, branch)"
-            @contextmenu="enableActions && openMenu($event, branch)"
+            @click="onLeafClick($event, branch, 'recent')"
+            @contextmenu="enableActions && openMenu($event, branch, 'recent')"
           >
             <Icons :name="branch.current ? 'star' : 'circle'" :size="11" class="mark" />
             <span class="name">{{ branch.name }}</span>
@@ -194,10 +200,10 @@ defineExpose({
             :key="`local:${branch.name}`"
             type="button"
             class="leaf"
-            :class="{ current: branch.current, selected: branch.name === (highlighted || selected) }"
+            :class="{ current: branch.current, selected: branch.name === selected || `local:${branch.name}` === highlighted }"
             :title="branch.name"
-            @click="onLeafClick($event, branch)"
-            @contextmenu="enableActions && openMenu($event, branch)"
+            @click="onLeafClick($event, branch, 'local')"
+            @contextmenu="enableActions && openMenu($event, branch, 'local')"
           >
             <Icons :name="branch.current ? 'star' : 'circle'" :size="11" class="mark" />
             <span class="name">{{ branch.name }}</span>
@@ -218,10 +224,10 @@ defineExpose({
             :key="`remote:${branch.name}`"
             type="button"
             class="leaf"
-            :class="{ selected: branch.name === (highlighted || selected) }"
+            :class="{ selected: branch.name === selected || `remote:${branch.name}` === highlighted }"
             :title="branch.name"
-            @click="onLeafClick($event, branch)"
-            @contextmenu="enableActions && openMenu($event, branch)"
+            @click="onLeafClick($event, branch, 'remote')"
+            @contextmenu="enableActions && openMenu($event, branch, 'remote')"
           >
             <Icons name="circle" :size="11" class="mark" />
             <span class="name">{{ branch.name }}</span>
@@ -241,10 +247,10 @@ defineExpose({
             :key="`tag:${branch.name}`"
             type="button"
             class="leaf"
-            :class="{ selected: branch.name === (highlighted || selected) }"
+            :class="{ selected: branch.name === selected || `tag:${branch.name}` === highlighted }"
             :title="branch.name"
-            @click="onLeafClick($event, branch)"
-            @contextmenu="enableActions && openMenu($event, branch)"
+            @click="onLeafClick($event, branch, 'tag')"
+            @contextmenu="enableActions && openMenu($event, branch, 'tag')"
           >
             <Icons name="circle" :size="11" class="mark" />
             <span class="name">{{ branch.name }}</span>
@@ -255,19 +261,26 @@ defineExpose({
     </div>
 
     <Teleport to="body">
-      <div v-if="menu.open" class="ctx-mask" @mousedown="closeMenu">
+      <div v-if="menu.open" class="ctx-mask" @mousedown.stop="closeMenu">
         <div
           class="popup-menu ctx"
           :style="{ top: `${menu.y}px`, left: `${menu.x}px` }"
           @mousedown.stop
         >
-          <button type="button" :disabled="Boolean(menu.branch?.current)" @click="run('checkout')">签出</button>
-          <button type="button" @click="run('new-branch')">从 '{{ menu.branch?.name }}' 新建分支…</button>
-          <button type="button" @click="run('diff')">显示与工作树的差异</button>
-          <button type="button" @click="run('update')">更新</button>
-          <button type="button" @click="run('push')">推送…</button>
-          <button type="button" @click="run('track')">跟踪分支 '{{ trackTarget }}'</button>
-          <button type="button" :disabled="Boolean(menu.branch?.remote || menu.branch?.kind === 'tag')" @click="run('rename')">重命名…</button>
+          <template v-if="menu.branch?.kind === 'tag'">
+            <button type="button" @click="run('push-tag')">推送标签…</button>
+            <button type="button" @click="run('delete-tag')">删除标签</button>
+          </template>
+          <template v-else>
+            <button type="button" :disabled="Boolean(menu.branch?.current)" @click="run('checkout')">签出</button>
+            <button type="button" @click="run('new-branch')">从 '{{ menu.branch?.name }}' 新建分支…</button>
+            <button type="button" @click="run('diff')">显示与工作树的差异</button>
+            <button type="button" @click="run('update')">更新</button>
+            <button type="button" @click="run('push')">推送…</button>
+            <button type="button" @click="run('track')">跟踪分支 '{{ trackTarget }}'</button>
+            <button type="button" :disabled="Boolean(menu.branch?.remote || menu.branch?.kind === 'tag')" @click="run('rename')">重命名…</button>
+            <button type="button" :disabled="Boolean(menu.branch?.current || menu.branch?.remote)" @click="run('delete')">删除</button>
+          </template>
         </div>
       </div>
     </Teleport>

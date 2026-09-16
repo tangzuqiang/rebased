@@ -7,7 +7,7 @@ mod watch;
 
 use git::{
     AppState, BranchInfo, FileDiff, FilePreview, GitCommit, GitFile, MergeCompare, MergeFileContent,
-    MergeOutcome, MergePreview, MergeState, RepoInfo, StatusPayload,
+    MergeOutcome, MergePreview, MergeState, RemoteDetail, RepoInfo, StatusPayload,
 };
 use std::path::PathBuf;
 use store::{AppStore, RecentProject, SessionState};
@@ -443,6 +443,34 @@ async fn save_worktree_file(
 }
 
 #[tauri::command]
+async fn copy_worktree(
+    state: State<'_, AppState>,
+    src: String,
+    dest: String,
+    repo: Option<String>,
+) -> Result<String, String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::copy_worktree(&repo, &src, &dest)).await
+}
+
+#[tauri::command]
+async fn rename_worktree(
+    state: State<'_, AppState>,
+    src: String,
+    dest: String,
+    repo: Option<String>,
+) -> Result<String, String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::rename_worktree(&repo, &src, &dest)).await
+}
+
+#[tauri::command]
+async fn delete_worktree(state: State<'_, AppState>, path: String, repo: Option<String>) -> Result<(), String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::delete_worktree(&repo, &path)).await
+}
+
+#[tauri::command]
 async fn drop_commit(state: State<'_, AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::drop_commit(&path, &hash)).await
@@ -520,6 +548,92 @@ async fn set_upstream(
 async fn update_branch(state: State<'_, AppState>, name: String, repo: Option<String>) -> Result<String, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::update_branch(&path, &name)).await
+}
+
+#[tauri::command]
+async fn delete_branch(
+    state: State<'_, AppState>,
+    name: String,
+    force: bool,
+    repo: Option<String>,
+) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::delete_branch(&path, &name, force)).await
+}
+
+#[tauri::command]
+async fn delete_tag(state: State<'_, AppState>, name: String, repo: Option<String>) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::delete_tag(&path, &name)).await
+}
+
+#[tauri::command]
+async fn push_tag(
+    state: State<'_, AppState>,
+    remote: String,
+    name: String,
+    repo: Option<String>,
+) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::push_tag(&path, &remote, &name)).await
+}
+
+#[tauri::command]
+async fn remote_details(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<RemoteDetail>, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::remote_details(&path)).await
+}
+
+#[tauri::command]
+async fn add_remote(
+    state: State<'_, AppState>,
+    name: String,
+    url: String,
+    repo: Option<String>,
+) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::add_remote(&path, &name, &url)).await
+}
+
+#[tauri::command]
+async fn remove_remote(state: State<'_, AppState>, name: String, repo: Option<String>) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::remove_remote(&path, &name)).await
+}
+
+#[tauri::command]
+async fn set_remote_url(
+    state: State<'_, AppState>,
+    name: String,
+    url: String,
+    repo: Option<String>,
+) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::set_remote_url(&path, &name, &url)).await
+}
+
+#[tauri::command]
+async fn apply_patch(state: State<'_, AppState>, path: String, repo: Option<String>) -> Result<String, String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::apply_patch(&repo, &path)).await
+}
+
+#[tauri::command]
+async fn add_worktree(
+    state: State<'_, AppState>,
+    path: String,
+    branch: String,
+    create_branch: bool,
+    repo: Option<String>,
+) -> Result<String, String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::add_worktree(&repo, &path, &branch, create_branch)).await
+}
+
+#[tauri::command]
+async fn remove_worktree(state: State<'_, AppState>, path: String, repo: Option<String>) -> Result<String, String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::remove_worktree(&repo, &path)).await
 }
 
 #[tauri::command]
@@ -659,6 +773,9 @@ pub fn run() {
             open_in_os,
             preview_file,
             save_worktree_file,
+            copy_worktree,
+            rename_worktree,
+            delete_worktree,
             drop_commit,
             push_upto,
             commit_diff,
@@ -668,6 +785,16 @@ pub fn run() {
             rename_branch,
             set_upstream,
             update_branch,
+            delete_branch,
+            delete_tag,
+            push_tag,
+            remote_details,
+            add_remote,
+            remove_remote,
+            set_remote_url,
+            apply_patch,
+            add_worktree,
+            remove_worktree,
             working_tree_diff,
             start_terminal,
             write_terminal,

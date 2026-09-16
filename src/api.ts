@@ -15,6 +15,7 @@ import type {
   MergeState,
   RecentProject,
   RebaseItem,
+  RemoteDetail,
   RepoInfo,
   SessionState,
   StatusPayload,
@@ -297,6 +298,18 @@ export function saveWorktreeFile(repo: string | undefined, path: string, content
   return invoke<FilePreview>("save_worktree_file", withRepo(repo, { path, content }));
 }
 
+export function copyWorktree(repo: string | undefined, src: string, dest: string) {
+  return invoke<string>("copy_worktree", withRepo(repo, { src, dest }));
+}
+
+export function renameWorktree(repo: string | undefined, src: string, dest: string) {
+  return invoke<string>("rename_worktree", withRepo(repo, { src, dest }));
+}
+
+export function deleteWorktree(repo: string | undefined, path: string) {
+  return invoke<void>("delete_worktree", withRepo(repo, { path }));
+}
+
 export function startTerminal(id: string, cwd: string, cols: number, rows: number) {
   return invoke<void>("start_terminal", { id, cwd, cols, rows });
 }
@@ -331,4 +344,44 @@ export function watchRepo(path: string) {
 
 export function unwatchRepo(path: string) {
   return invoke<void>("unwatch_repo", { path });
+}
+
+export function deleteBranch(repo: string | undefined, name: string, force = false) {
+  return invoke<string>("delete_branch", withRepo(repo, { name, force }));
+}
+
+export function deleteTag(repo: string | undefined, name: string) {
+  return invoke<string>("delete_tag", withRepo(repo, { name }));
+}
+
+export function pushTag(repo: string | undefined, remote: string, name: string) {
+  return invoke<string>("push_tag", withRepo(repo, { remote, name }));
+}
+
+export function remoteDetails(repo?: string) {
+  return invoke<RemoteDetail[]>("remote_details", withRepo(repo));
+}
+
+export function addRemote(repo: string | undefined, name: string, url: string) {
+  return invoke<string>("add_remote", withRepo(repo, { name, url }));
+}
+
+export function removeRemote(repo: string | undefined, name: string) {
+  return invoke<string>("remove_remote", withRepo(repo, { name }));
+}
+
+export function setRemoteUrl(repo: string | undefined, name: string, url: string) {
+  return invoke<string>("set_remote_url", withRepo(repo, { name, url }));
+}
+
+export function applyPatch(repo: string | undefined, path: string) {
+  return invoke<string>("apply_patch", withRepo(repo, { path }));
+}
+
+export function addWorktree(repo: string | undefined, path: string, branch: string, createBranch: boolean) {
+  return invoke<string>("add_worktree", withRepo(repo, { path, branch, createBranch }));
+}
+
+export function removeWorktree(repo: string | undefined, path: string) {
+  return invoke<string>("remove_worktree", withRepo(repo, { path }));
 }

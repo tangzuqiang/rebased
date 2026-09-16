@@ -32,6 +32,10 @@ const emit = defineEmits<{
   settings: [];
   files: [];
   terminal: [];
+  search: [];
+  remotes: [];
+  patch: [];
+  worktrees: [];
   newBranch: [];
   branchAction: [payload: { action: BranchMenuAction; branch: BranchInfo }];
 }>();
@@ -141,6 +145,10 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branc
         <button type="button" :disabled="busy" @click="run('new-branch')">新建分支…</button>
         <button v-if="merging" type="button" @click="branchOpen = false; emit('conflicts')">解决冲突…</button>
         <div class="divider" />
+        <button type="button" @click="branchOpen = false; emit('remotes')">管理远程仓库…</button>
+        <button type="button" :disabled="busy" @click="branchOpen = false; emit('patch')">应用补丁…</button>
+        <button type="button" @click="branchOpen = false; emit('worktrees')">管理工作树…</button>
+        <div class="divider" />
         <BranchFilterList
           ref="branchFilter"
           :branches="branches"
@@ -167,7 +175,7 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branc
     </div>
 
     <div class="right">
-      <button class="icon-btn" title="搜索">
+      <button class="icon-btn" title="搜索" @click="emit('search')">
         <Icons name="search" />
       </button>
       <button class="icon-btn" title="设置" @click="emit('settings')">

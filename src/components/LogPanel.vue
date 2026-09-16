@@ -48,6 +48,8 @@ const emit = defineEmits<{
 const query = ref("");
 const userFilter = ref<string[]>([]);
 const dateFilter = ref<"all" | "today" | "week">("all");
+const searchInput = ref<HTMLInputElement | null>(null);
+const compareHash = ref("");
 
 const authors = computed(() => props.commits.map((commit) => commit.author).filter(Boolean));
 const menu = ref({ open: false, x: 0, y: 0, hash: "" });
@@ -336,6 +338,36 @@ function checkoutRef(name: string) {
   closeMenu();
   emit("checkout", name);
 }
+
+function setCompareBase() {
+  const hash = selected.value?.hash;
+  if (!hash) return;
+  compareHash.value = hash;
+  closeMenu();
+}
+
+function doCompareTwo() {
+  const commit = selected.value;
+  if (!commit || !compareHash.value) return;
+  closeMenu();
+  dialog.value = "compare";
+  comparePatch.value = null;
+  void commitDiff(props.repo.path, compareHash.value, commit.hash).then((diff) => {
+    comparePatch.value = diff;
+  }).catch((error) => {
+    actionError.value = error instanceof Error ? error.message : String(error);
+  });
+}
+
+function clearCompareBase() {
+  compareHash.value = "";
+}
+
+defineExpose({
+  focusSearch() {
+    searchInput.value?.focus();
+  },
+});
 </script>
 
 <template>
@@ -350,7 +382,7 @@ function checkoutRef(name: string) {
         <div class="filters">
           <label class="chip grow">
             <Icons name="search" :size="13" />
-            <input v-model="query" placeholder="文本或哈希" />
+            <input ref="searchInput" v-model="query" placeholder="文本或哈希" />
           </label>
           <UserFilter
             :authors="authors"
@@ -431,6 +463,9 @@ function checkoutRef(name: string) {
       <button type="button" :disabled="busy || acting || isHead" @click="doCherryPick">拣选</button>
       <button type="button" :disabled="busy || acting || isHead" @click="doCheckoutRev">检出修订</button>
       <button type="button" :disabled="busy || acting || isHead" @click="doCompare">与本地比较</button>
+      <button type="button" @click="setCompareBase">设为比较基准</button>
+      <button v-if="compareHash" type="button" :disabled="busy || acting" @click="doCompareTwo">与 {{ compareHash.slice(0, 7) }} 比较</button>
+      <button v-if="compareHash" type="button" @click="clearCompareBase">清除比较基准</button>
       <button type="button" :disabled="busy || acting" @click="doReset">将当前分支重置到此处…</button>
       <button type="button" :disabled="busy || acting" @click="doRevert">还原提交</button>
       <button type="button" :disabled="busy || acting || !isHead" @click="doUndo">撤销提交</button>
@@ -623,21 +658,9 @@ function checkoutRef(name: string) {
   color: var(--text);
 }
 
-.row:hover {
-  background: var(--bg-hover);
-}
-
+.row:hover,
 .row.selected {
-  background: var(--bg-selected);
-}
-
-.row.merge .msg {
-  color: #d2a8ff;
-  font-weight: 600;
-}
-
-.row.merge.selected .msg {
-  color: #efd4ff;
+  background: var(--bg-hover);
 }
 
 .merge-tag {

@@ -75,6 +75,11 @@ export interface BranchInfo {
   upstream?: string;
 }
 
+export interface RemoteDetail {
+  name: string;
+  url: string;
+}
+
 export interface RebaseItem {
   action: string;
   hash: string;

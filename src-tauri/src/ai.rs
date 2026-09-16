@@ -154,8 +154,7 @@ fn collect_diff_context(repo: &std::path::Path, paths: &[DiffPath]) -> (Vec<Stri
             format!("文件：{}\n（没有文本 diff，请根据文件名理解变更）", item.path)
         } else {
             let mut patch = diff.patch;
-            if patch.len() > 4000 {
-                patch.truncate(4000);
+            if truncate_utf8(&mut patch, 4000) {
                 patch.push_str("\n…");
             }
             format!("文件：{}\n{}", item.path, patch)
@@ -280,6 +279,18 @@ fn format_api_error(status: u16, value: &serde_json::Value, url: &str, cfg: &AiC
         404 => format!("AI 接口不存在（HTTP 404）：{url}，请确认地址是否包含 /v1"),
         _ => format!("AI 接口错误 HTTP {status}：{detail}（模型 {}，接口 {}）", cfg.model, url),
     }
+}
+
+fn truncate_utf8(text: &mut String, max_bytes: usize) -> bool {
+    if text.len() <= max_bytes {
+        return false;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    true
 }
 
 fn looks_like_url(value: &str) -> bool {

@@ -3,6 +3,8 @@ import { computed, nextTick, ref, watch } from "vue";
 import { getConflictFile } from "../api";
 import { alignDiff3 } from "../diff3";
 import { commentPrefix, findInTextarea, handleIdeEditorKey, writeTextarea } from "../editorKeys";
+import { highlightCode } from "../highlight";
+import "highlight.js/styles/atom-one-dark.css";
 import { notify } from "../notify";
 import type { BlameLine, Diff3Row, DiffKind, MergeFileContent, MergeState } from "../types";
 import Icons from "./Icons.vue";
@@ -28,6 +30,32 @@ interface Hunk {
   conflict: boolean;
 }
 
+interface ViewerRow {
+  isFold: false;
+  oursHtml: string;
+  theirsHtml: string;
+  oursNo: number | "";
+  theirsNo: number | "";
+  oursKind: string;
+  theirsKind: string;
+  oursBlame?: BlameLine;
+  theirsBlame?: BlameLine;
+  rowIndex: number;
+  hunkStart: boolean;
+  hunk?: Hunk;
+  conflictBorder: boolean;
+  blameOursAnno: string;
+  blameTheirsAnno: string;
+}
+
+interface FoldRow {
+  isFold: true;
+  count: number;
+  start: number;
+}
+
+type VRow = ViewerRow | FoldRow;
+
 const content = ref<MergeFileContent | null>(null);
 const result = ref("");
 const resultLines = ref<Array<string | null>>([]);
@@ -38,7 +66,6 @@ const error = ref("");
 const ignoreWhitespace = ref(false);
 const showBlame = ref(true);
 const overwrite = ref<"ours" | "theirs" | "">("");
-const blameMenu = ref({ open: false, x: 0, y: 0 });
 const currentHunk = ref(0);
 const mergeReady = ref(false);
 const completeOpen = ref(false);
@@ -53,6 +80,9 @@ const resultEditor = ref<HTMLTextAreaElement | null>(null);
 const findOpen = ref(false);
 const findQuery = ref("");
 const findHint = ref("");
+const collapsedFolds = ref<Set<number>>(new Set());
+
+const FOLD_THRESHOLD = 8;
 
 const rows = computed<Diff3Row[]>(() => {
   if (!content.value || content.value.binary) return [];
@@ -94,14 +124,84 @@ const hunks = computed(() => {
   return list;
 });
 
-const unresolvedConflicts = computed(() => hunks.value.filter((hunk) => hunk.conflict && !hunkDone(hunk)));
+const unresolvedConflicts = computed(() => hunks.value.filter((h) => h.conflict && !hunkDone(h)));
 const conflictCount = computed(() => unresolvedConflicts.value.length);
+const totalConflicts = computed(() => hunks.value.filter((h) => h.conflict).length);
+const resolvedCount = computed(() => totalConflicts.value - conflictCount.value);
 const currentStart = computed(() => hunks.value[currentHunk.value]?.start ?? -1);
-const canGoUp = computed(() => unresolvedConflicts.value.some((hunk) => hunk.start < currentStart.value));
-const canGoDown = computed(() => unresolvedConflicts.value.some((hunk) => hunk.start > currentStart.value));
-const nonConflictCount = computed(() => hunks.value.filter((hunk) => !hunk.conflict && !hunkDone(hunk)).length);
-const oursNos = computed(() => numberSide(rows.value, (row) => row.oursKind));
-const theirsNos = computed(() => numberSide(rows.value, (row) => row.theirsKind));
+const canGoUp = computed(() => unresolvedConflicts.value.some((h) => h.start < currentStart.value));
+const canGoDown = computed(() => unresolvedConflicts.value.some((h) => h.start > currentStart.value));
+const nonConflictCount = computed(() => hunks.value.filter((h) => !h.conflict && !hunkDone(h)).length);
+
+const highlighted = computed(() => {
+  const all = rows.value;
+  if (!all.length || !content.value || content.value.binary)
+    return { ours: [] as string[], theirs: [] as string[] };
+  const oursLines = all.map((r) => r.ours);
+  const theirsLines = all.map((r) => r.theirs);
+  return {
+    ours: splitHighlighted(oursLines, content.value!.path),
+    theirs: splitHighlighted(theirsLines, content.value!.path),
+  };
+});
+
+const wordDiffMap = computed(() => {
+  const cache = new Map<string, WordSeg[]>();
+  const result = new Map<number, WordSeg[]>();
+  for (const hunk of hunks.value) {
+    if (!hunk.conflict) continue;
+    for (let i = hunk.start; i < hunk.end; i++) {
+      const row = rows.value[i];
+      if (!row || row.oursKind !== "conflict") continue;
+      const key = `${row.ours}\x00${row.theirs}`;
+      let segs = cache.get(key);
+      if (!segs) {
+        segs = computeWordDiff(row.ours, row.theirs);
+        cache.set(key, segs);
+      }
+      result.set(i, segs);
+    }
+  }
+  return result;
+});
+
+const oursNos = computed(() => numberSide(rows.value, (r) => r.oursKind));
+const theirsNos = computed(() => numberSide(rows.value, (r) => r.theirsKind));
+
+const viewerRows = computed<VRow[]>(() => {
+  const all = rows.value;
+  const hl = highlighted.value;
+  const result: VRow[] = [];
+  let i = 0;
+
+  while (i < all.length) {
+    const row = all[i];
+    const oursChanged = isSideChange(row.oursKind);
+    const theirsChanged = isSideChange(row.theirsKind);
+
+    if (oursChanged || theirsChanged) {
+      const hunk = hunkAt(i);
+      result.push(makeViewerRow(i, hl, hunk));
+      i++;
+    } else {
+      let start = i;
+      while (i < all.length && !isSideChange(all[i].oursKind) && !isSideChange(all[i].theirsKind)) {
+        i++;
+      }
+      const count = i - start;
+
+      if (count > FOLD_THRESHOLD) {
+        result.push({ isFold: true, count, start });
+        for (let j = start; j < i; j++) result.push(makeViewerRow(j, hl, undefined));
+      } else {
+        for (let j = start; j < i; j++) result.push(makeViewerRow(j, hl, undefined));
+      }
+    }
+  }
+  return result;
+});
+
+const resultLineCount = computed(() => Math.max(rows.value.length, result.value.split("\n").length));
 
 watch(
   () => props.path,
@@ -119,6 +219,7 @@ watch([() => content.value?.path, ignoreWhitespace], () => {
   completeOpen.value = false;
   completeShown.value = false;
   overwrite.value = "";
+  collapsedFolds.value = new Set();
 });
 
 watch(resultEditor, (el) => {
@@ -177,7 +278,7 @@ function defaultResultLine(row: Diff3Row) {
 }
 
 function joinResult(lines: Array<string | null>) {
-  return lines.filter((line): line is string => line !== null).join("\n");
+  return lines.filter((l): l is string => l !== null).join("\n");
 }
 
 function seedResult() {
@@ -195,9 +296,9 @@ function markComplete() {
 }
 
 function checkConflictsResolved() {
-  const conflicts = hunks.value.filter((hunk) => hunk.conflict);
+  const conflicts = hunks.value.filter((h) => h.conflict);
   if (!conflicts.length) return;
-  if (conflicts.every((hunk) => hunkDone(hunk))) markComplete();
+  if (conflicts.every((h) => hunkDone(h))) markComplete();
 }
 
 function sideSettled(hunk: Hunk, side: "ours" | "theirs") {
@@ -228,19 +329,19 @@ function hunkKey(hunk: Hunk) {
 }
 
 function hunkAt(index: number) {
-  return hunks.value.find((hunk) => hunk.start === index);
+  return hunks.value.find((h) => h.start === index);
 }
 
 function hunkOf(index: number) {
-  return hunks.value.find((hunk) => index >= hunk.start && index < hunk.end);
+  return hunks.value.find((h) => index >= h.start && index < h.end);
 }
 
 function applyHunk(hunk: Hunk, side: "ours" | "theirs" | "base") {
   syncLinesFromResult();
   const source = rows.value;
   const next = source.map((row, index) => resultLines.value[index] ?? defaultResultLine(row));
-  for (let index = hunk.start; index < hunk.end; index += 1) {
-    next[index] = lineFrom(source[index], side);
+  for (let i = hunk.start; i < hunk.end; i += 1) {
+    next[i] = lineFrom(source[i], side);
   }
   resultLines.value = next;
   choice.value = { ...choice.value, [hunkKey(hunk)]: side };
@@ -341,37 +442,53 @@ function blameDateAuthor(meta?: BlameLine) {
   return date ? `${date} ${meta.author}` : meta.author;
 }
 
-function blameMeta(index: number, side: "ours" | "theirs") {
-  const row = rows.value[index];
-  return side === "ours" ? row.oursBlame : row.theirsBlame;
-}
-
 function blameAnno(index: number, side: "ours" | "theirs") {
   if (!showBlame.value) return "";
-  const label = blameDateAuthor(blameMeta(index, side));
+  const row = rows.value[index];
+  const meta = side === "ours" ? row.oursBlame : row.theirsBlame;
+  const label = blameDateAuthor(meta);
   if (!label) return "";
-  if (index > 0 && blameDateAuthor(blameMeta(index - 1, side)) === label) return "";
+  if (index > 0) {
+    const prevRow = rows.value[index - 1];
+    const prevMeta = side === "ours" ? prevRow.oursBlame : prevRow.theirsBlame;
+    if (blameDateAuthor(prevMeta) === label) return "";
+  }
   return label;
 }
 
-function cellTitle(kind: DiffKind, meta?: BlameLine, text = "") {
-  const blame = formatBlame(meta);
-  if (kind === "same" || kind === "empty") return blame || text;
-  return blame ? `${text}\n${blame}` : text;
-}
+function makeViewerRow(index: number, hl: { ours: string[]; theirs: string[] }, hunk: Hunk | undefined): ViewerRow {
+  const row = rows.value[index];
+  const sk_ours = sideKind(index, "ours");
+  const sk_theirs = sideKind(index, "theirs");
+  let oursHtml = hl.ours[index] ?? escapeHtml(row.ours);
+  let theirsHtml = hl.theirs[index] ?? escapeHtml(row.theirs);
 
-function openBlameMenu(event: MouseEvent) {
-  event.preventDefault();
-  blameMenu.value = { open: true, x: event.clientX, y: event.clientY };
-}
+  if (hunk?.conflict && sk_ours === "conflict") {
+    const segs = wordDiffMap.value.get(index);
+    if (segs) oursHtml = renderWordHtml(segs, "ours");
+  }
+  if (hunk?.conflict && sk_theirs === "conflict") {
+    const segs = wordDiffMap.value.get(index);
+    if (segs) theirsHtml = renderWordHtml(segs, "theirs");
+  }
 
-function closeBlameMenu() {
-  blameMenu.value.open = false;
-}
-
-function toggleBlame() {
-  showBlame.value = !showBlame.value;
-  closeBlameMenu();
+  return {
+    isFold: false,
+    oursHtml,
+    theirsHtml,
+    oursNo: oursNos.value[index],
+    theirsNo: theirsNos.value[index],
+    oursKind: sk_ours,
+    theirsKind: sk_theirs,
+    oursBlame: row.oursBlame,
+    theirsBlame: row.theirsBlame,
+    rowIndex: index,
+    hunkStart: hunk !== undefined && hunk.start === index,
+    hunk,
+    conflictBorder: hunk !== undefined && hunk.conflict && !hunkDone(hunk),
+    blameOursAnno: blameAnno(index, "ours"),
+    blameTheirsAnno: blameAnno(index, "theirs"),
+  };
 }
 
 function panes() {
@@ -400,10 +517,10 @@ async function goHunk(delta: number) {
   const start = currentStart.value;
   const target =
     delta < 0
-      ? [...list].reverse().find((hunk) => hunk.start < start)
-      : list.find((hunk) => hunk.start > start);
+      ? [...list].reverse().find((h) => h.start < start)
+      : list.find((h) => h.start > start);
   if (!target) return;
-  currentHunk.value = Math.max(0, hunks.value.findIndex((hunk) => hunk.start === target.start));
+  currentHunk.value = Math.max(0, hunks.value.findIndex((h) => h.start === target.start));
   await nextTick();
   const top = Math.max(0, target.start * 18 - 80);
   for (const pane of panes()) {
@@ -458,150 +575,319 @@ function cancelMerge() {
   if (!window.confirm("确定取消本次合并？工作区将恢复到合并前的状态。")) return;
   emit("abort");
 }
+
+function toggleFold(start: number) {
+  const next = new Set(collapsedFolds.value);
+  if (next.has(start)) next.delete(start);
+  else next.add(start);
+  collapsedFolds.value = next;
+}
+
+function escapeHtml(text: string) {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function splitHighlighted(lines: string[], filePath: string): string[] {
+  if (!lines.length) return [];
+  const full = highlightCode(lines.join("\n"), filePath);
+  return splitHtmlLines(full);
+}
+
+function splitHtmlLines(html: string): string[] {
+  const result: string[] = [];
+  let current = "";
+  const openStack: string[] = [];
+  const tagRegex = /(<\/?[^>]+>)/g;
+  const parts = html.split(tagRegex).filter(Boolean);
+
+  for (const part of parts) {
+    if (part.startsWith("<")) {
+      if (part.startsWith("</")) {
+        openStack.pop();
+      } else if (!part.endsWith("/>")) {
+        openStack.push(part);
+      }
+      current += part;
+    } else {
+      const segments = part.split("\n");
+      for (let i = 0; i < segments.length; i++) {
+        if (i > 0) {
+          result.push(current);
+          current = openStack.join("");
+        }
+        current += segments[i];
+      }
+    }
+  }
+  result.push(current);
+  return result;
+}
+
+interface WordSeg {
+  text: string;
+  type: "same" | "oursOnly" | "theirsOnly";
+}
+
+function tokenize(text: string): string[] {
+  return text.match(/\s+|\w+|[^\s\w]/g) ?? [];
+}
+
+function computeWordDiff(ours: string, theirs: string): WordSeg[] {
+  const a = tokenize(ours);
+  const b = tokenize(theirs);
+  const n = a.length;
+  const m = b.length;
+
+  if (n === 0 && m === 0) return [];
+  if (n === 0) return b.map((text) => ({ text, type: "theirsOnly" as const }));
+  if (m === 0) return a.map((text) => ({ text, type: "oursOnly" as const }));
+
+  const maxLen = Math.max(...a.map((t) => t.length), ...b.map((t) => t.length), 1);
+  if (n * m > 500000 || maxLen > 200) {
+    return a.map((text) => ({ text, type: "same" as const }));
+  }
+
+  const dp: number[][] = Array.from({ length: n + 1 }, () => Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+
+  const segs: WordSeg[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      segs.push({ text: a[i], type: "same" });
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      segs.push({ text: a[i], type: "oursOnly" });
+      i++;
+    } else {
+      segs.push({ text: b[j], type: "theirsOnly" });
+      j++;
+    }
+  }
+  while (i < n) {
+    segs.push({ text: a[i], type: "oursOnly" });
+    i++;
+  }
+  while (j < m) {
+    segs.push({ text: b[j], type: "theirsOnly" });
+    j++;
+  }
+  return segs;
+}
+
+function renderWordHtml(segs: WordSeg[], side: "ours" | "theirs"): string {
+  const includeType = side === "ours" ? "oursOnly" : "theirsOnly";
+  return segs
+    .filter((s) => s.type === "same" || s.type === includeType)
+    .map((s) => {
+      const text = escapeHtml(s.text);
+      if (s.type === includeType && s.text.trim()) {
+        return `<span class="wd">${text}</span>`;
+      }
+      return text;
+    })
+    .join("");
+}
 </script>
 
 <template>
   <Teleport to="body">
     <div class="page">
       <header class="toolbar">
-        <button type="button" class="icon-btn" title="返回冲突列表" @click="emit('back')">←</button>
-        <button type="button" class="icon-btn" title="上一个冲突" :disabled="!canGoUp" @click="goHunk(-1)">
+        <button type="button" class="tb-btn back-btn" title="返回冲突列表 (Esc)" @click="emit('back')">
+          <Icons name="arrow-left" :size="14" />
+          <span>返回</span>
+        </button>
+        <div class="tb-sep" />
+        <button type="button" class="tb-btn" title="上一个冲突" :disabled="!canGoUp" @click="goHunk(-1)">
           <Icons name="arrow-up" :size="14" />
         </button>
-        <button type="button" class="icon-btn" title="下一个冲突" :disabled="!canGoDown" @click="goHunk(1)">
+        <button type="button" class="tb-btn" title="下一个冲突" :disabled="!canGoDown" @click="goHunk(1)">
           <Icons name="arrow-down" :size="14" />
         </button>
+        <div class="tb-sep" />
+        <div class="conflict-badge" :class="{ resolved: conflictCount === 0 }">
+          <span v-if="conflictCount > 0" class="badge-icon">&#x26A0;</span>
+          <span v-else class="badge-icon">&#x2713;</span>
+          <span v-if="conflictCount > 0">{{ conflictCount }} 处冲突待处理</span>
+          <span v-else>所有冲突已处理</span>
+          <span v-if="totalConflicts > 0" class="badge-progress">{{ resolvedCount }}/{{ totalConflicts }}</span>
+        </div>
         <button
           type="button"
-          class="icon-btn"
-          title="应用非冲突更改"
+          class="tb-btn apply-btn"
           :disabled="busy || !nonConflictCount"
+          title="自动应用所有非冲突更改"
           @click="applyNonConflicts"
         >
-          <Icons name="apply-both" :size="16" />
+          <Icons name="apply-both" :size="14" />
+          <span>应用非冲突</span>
         </button>
-        <strong class="remain" :class="{ zero: conflictCount === 0 }">
-          {{ conflictCount > 0 ? `还有 ${conflictCount} 处冲突` : "冲突已处理完" }}
-        </strong>
-        <span class="cover-label">覆盖</span>
+        <div class="tb-sep" />
+        <span class="tb-label">覆盖全部:</span>
         <button
           type="button"
-          class="cover-btn"
+          class="tb-btn cover-btn"
           :class="{ on: overwrite === 'ours' }"
           :disabled="busy"
-          title="用本地版本覆盖全部改动"
+          title="用本地版本覆盖全部"
           @click="coverAll('ours')"
         >
           本地
         </button>
         <button
           type="button"
-          class="cover-btn"
+          class="tb-btn cover-btn"
           :class="{ on: overwrite === 'theirs' }"
           :disabled="busy"
-          title="用传入版本覆盖全部改动"
+          title="用传入版本覆盖全部"
           @click="coverAll('theirs')"
         >
           传入
         </button>
         <span class="file-path" :title="path">{{ path }}</span>
-        <label class="ws">
+        <label class="tb-check">
           <input v-model="showBlame" type="checkbox" />
-          使用 Git 追溯注解
+          <span>Blame</span>
         </label>
-        <label class="ws">
+        <label class="tb-check">
           <input v-model="ignoreWhitespace" type="checkbox" />
-          忽略空白变更
+          <span>忽略空白</span>
         </label>
-        <span class="counts">{{ hunks.length }}个更改</span>
+        <span class="tb-count">{{ hunks.length }} 个更改</span>
       </header>
 
       <p v-if="error" class="err">{{ error }}</p>
       <p v-else-if="loading" class="empty-hint">正在加载三端内容和行历史…</p>
       <div v-else-if="content?.binary" class="empty-hint">二进制文件请返回列表后使用「接受左边」或「接受右边」</div>
-      <div v-else class="workspace" @contextmenu="openBlameMenu">
-        <section class="col">
-          <div class="pane-head ours">本地 · {{ state.ours }} 更改处</div>
-          <div ref="oursPane" class="pane scroll" @scroll="syncScroll">
-            <div
-              v-for="(row, index) in rows"
-              :key="`o-${index}`"
-              class="line"
-              :class="[sideKind(index, 'ours'), { current: hunkOf(index)?.start === hunks[currentHunk]?.start }]"
-              :title="cellTitle(row.oursKind, row.oursBlame, row.ours)"
-            >
-              <span class="no">{{ oursNos[index] }}</span>
-              <span v-if="showBlame" class="blame" :title="formatBlame(row.oursBlame)">{{ blameAnno(index, 'ours') }}</span>
-              <span class="code">{{ row.ours }}</span>
-            </div>
+      <div v-else class="workspace">
+        <section class="pane-col ours-col">
+          <div class="pane-head ours-head">
+            <span class="head-badge ours-badge">本地</span>
+            <span class="head-branch">{{ state.ours }}</span>
+          </div>
+          <div ref="oursPane" class="pane-body" @scroll="syncScroll">
+            <template v-for="(vr, vi) in viewerRows" :key="`o-${vi}`">
+              <div v-if="vr.isFold" class="fold-bar" @click="toggleFold(vr.start)">
+                <span class="fold-icon">&#x22EE;</span>
+                <span class="fold-text">{{ vr.count }} 行未更改</span>
+              </div>
+              <div
+                v-else
+                class="line"
+                :class="[vr.oursKind, { current: vr.hunk?.start === hunks[currentHunk]?.start, 'conflict-border': vr.conflictBorder }]"
+                :title="formatBlame(vr.oursBlame)"
+              >
+                <span class="no">{{ vr.oursNo }}</span>
+                <span v-if="showBlame" class="blame" :title="formatBlame(vr.oursBlame)">{{ vr.blameOursAnno }}</span>
+                <span class="code" v-html="vr.oursHtml" />
+              </div>
+            </template>
           </div>
         </section>
 
         <section class="gutter-col">
-          <div class="pane-head" />
+          <div class="gutter-head" />
           <div ref="leftGutter" class="gutter-body" @scroll="syncScroll">
-            <div v-for="(_row, index) in rows" :key="`lg-${index}`" class="gutter-row">
-              <template v-if="hunkAt(index)?.ours && !sideSettled(hunkAt(index)!, 'ours')">
-                <button type="button" class="arrow" title="选择左侧此段" @click.stop="acceptHunk(hunkAt(index)!, 'ours')">»</button>
-                <button type="button" class="x" title="舍弃左侧此段" @click.stop="rejectHunk(hunkAt(index)!, 'ours')">×</button>
-              </template>
-            </div>
+            <template v-for="(vr, vi) in viewerRows" :key="`lg-${vi}`">
+              <div v-if="vr.isFold" class="fold-gutter" />
+              <div v-else class="gutter-row" :class="{ 'hunk-start': vr.hunkStart }">
+                <template v-if="vr.hunkStart && vr.hunk?.ours && !sideSettled(vr.hunk, 'ours')">
+                  <button type="button" class="accept-btn" title="接受本地此段 (»)" @click.stop="acceptHunk(vr.hunk!, 'ours')">
+                    <svg viewBox="0 0 12 12" width="12" height="12"><path d="M3 1 L8 6 L3 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </button>
+                  <button type="button" class="reject-btn" title="舍弃本地此段" @click.stop="rejectHunk(vr.hunk!, 'ours')">
+                    <svg viewBox="0 0 12 12" width="10" height="10"><path d="M2 2 L10 10 M10 2 L2 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                  </button>
+                </template>
+              </div>
+            </template>
           </div>
         </section>
 
-        <section class="col">
-          <div class="pane-head result">
-            <span>结果</span>
+        <section class="pane-col result-col">
+          <div class="pane-head result-head">
+            <span class="head-badge result-badge">结果</span>
             <span v-if="findOpen" class="findbar">
               <input
                 v-model="findQuery"
-                placeholder="查找"
+                placeholder="查找…"
                 @keydown.enter.prevent="runFind($event.shiftKey)"
                 @keydown.escape.prevent="findOpen = false"
               />
-              <button type="button" title="上一个" @click="runFind(true)">↑</button>
-              <button type="button" title="下一个" @click="runFind(false)">↓</button>
+              <button type="button" title="上一个 (Shift+F3)" @click="runFind(true)">
+                <Icons name="arrow-up" :size="12" />
+              </button>
+              <button type="button" title="下一个 (F3)" @click="runFind(false)">
+                <Icons name="arrow-down" :size="12" />
+              </button>
               <em v-if="findHint">{{ findHint }}</em>
             </span>
           </div>
-          <div ref="resultPane" class="pane scroll result-pane" @scroll="syncScroll">
-            <textarea
-              ref="resultEditor"
-              class="result-editor"
-              spellcheck="false"
-              :style="{ minHeight: `${Math.max(rows.length, result.split('\n').length) * 18}px` }"
-              @input="onResultInput"
-              @keydown="onResultKey"
-            />
+          <div ref="resultPane" class="pane-body result-pane-body" @scroll="syncScroll">
+            <div class="result-wrap">
+              <div class="result-lines-col">
+                <div v-for="n in resultLineCount" :key="n" class="result-no">{{ n }}</div>
+              </div>
+              <textarea
+                ref="resultEditor"
+                class="result-editor"
+                spellcheck="false"
+                :style="{ minHeight: `${resultLineCount * 18}px` }"
+                @input="onResultInput"
+                @keydown="onResultKey"
+              />
+            </div>
           </div>
         </section>
 
         <section class="gutter-col">
-          <div class="pane-head" />
+          <div class="gutter-head" />
           <div ref="rightGutter" class="gutter-body" @scroll="syncScroll">
-            <div v-for="(_row, index) in rows" :key="`rg-${index}`" class="gutter-row">
-              <template v-if="hunkAt(index)?.theirs && !sideSettled(hunkAt(index)!, 'theirs')">
-                <button type="button" class="arrow" title="选择右侧此段" @click.stop="acceptHunk(hunkAt(index)!, 'theirs')">«</button>
-                <button type="button" class="x" title="舍弃右侧此段" @click.stop="rejectHunk(hunkAt(index)!, 'theirs')">×</button>
-              </template>
-            </div>
+            <template v-for="(vr, vi) in viewerRows" :key="`rg-${vi}`">
+              <div v-if="vr.isFold" class="fold-gutter" />
+              <div v-else class="gutter-row" :class="{ 'hunk-start': vr.hunkStart }">
+                <template v-if="vr.hunkStart && vr.hunk?.theirs && !sideSettled(vr.hunk, 'theirs')">
+                  <button type="button" class="accept-btn" title="接受传入此段 («)" @click.stop="acceptHunk(vr.hunk!, 'theirs')">
+                    <svg viewBox="0 0 12 12" width="12" height="12"><path d="M9 1 L4 6 L9 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </button>
+                  <button type="button" class="reject-btn" title="舍弃传入此段" @click.stop="rejectHunk(vr.hunk!, 'theirs')">
+                    <svg viewBox="0 0 12 12" width="10" height="10"><path d="M2 2 L10 10 M10 2 L2 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                  </button>
+                </template>
+              </div>
+            </template>
           </div>
         </section>
 
-        <section class="col">
-          <div class="pane-head theirs">传入 · {{ state.theirs }} 更改处</div>
-          <div ref="theirsPane" class="pane scroll" @scroll="syncScroll">
-            <div
-              v-for="(row, index) in rows"
-              :key="`t-${index}`"
-              class="line"
-              :class="[sideKind(index, 'theirs'), { current: hunkOf(index)?.start === hunks[currentHunk]?.start }]"
-              :title="cellTitle(row.theirsKind, row.theirsBlame, row.theirs)"
-            >
-              <span class="no">{{ theirsNos[index] }}</span>
-              <span v-if="showBlame" class="blame" :title="formatBlame(row.theirsBlame)">{{ blameAnno(index, 'theirs') }}</span>
-              <span class="code">{{ row.theirs }}</span>
-            </div>
+        <section class="pane-col theirs-col">
+          <div class="pane-head theirs-head">
+            <span class="head-badge theirs-badge">传入</span>
+            <span class="head-branch">{{ state.theirs }}</span>
+          </div>
+          <div ref="theirsPane" class="pane-body" @scroll="syncScroll">
+            <template v-for="(vr, vi) in viewerRows" :key="`t-${vi}`">
+              <div v-if="vr.isFold" class="fold-bar" @click="toggleFold(vr.start)">
+                <span class="fold-icon">&#x22EE;</span>
+                <span class="fold-text">{{ vr.count }} 行未更改</span>
+              </div>
+              <div
+                v-else
+                class="line"
+                :class="[vr.theirsKind, { current: vr.hunk?.start === hunks[currentHunk]?.start, 'conflict-border': vr.conflictBorder }]"
+                :title="formatBlame(vr.theirsBlame)"
+              >
+                <span class="no">{{ vr.theirsNo }}</span>
+                <span v-if="showBlame" class="blame" :title="formatBlame(vr.theirsBlame)">{{ vr.blameTheirsAnno }}</span>
+                <span class="code" v-html="vr.theirsHtml" />
+              </div>
+            </template>
           </div>
         </section>
       </div>
@@ -609,22 +895,18 @@ function cancelMerge() {
       <footer class="foot">
         <button type="button" class="secondary-btn" @click="emit('back')">返回列表</button>
         <span class="spacer" />
-        <button type="button" class="primary-btn" :disabled="busy || conflictCount > 0" @click="applyCurrent">应用</button>
+        <button type="button" class="primary-btn apply-current" :disabled="busy || conflictCount > 0" @click="applyCurrent">
+          <Icons name="check" :size="14" />
+          应用
+        </button>
         <button type="button" class="secondary-btn" :disabled="busy" @click="cancelMerge">取消合并</button>
       </footer>
     </div>
 
-    <div v-if="blameMenu.open" class="ctx-mask" @mousedown="closeBlameMenu">
-      <div class="ctx" :style="{ top: `${blameMenu.y}px`, left: `${blameMenu.x}px` }" @mousedown.stop>
-        <button type="button" class="ctx-item" @click="toggleBlame">
-          <span class="mark">{{ showBlame ? "✓" : "" }}</span>
-          使用 Git 追溯注解
-        </button>
-      </div>
-    </div>
     <div v-if="completeOpen" class="complete-mask" @mousedown.self="completeOpen = false">
       <div class="complete-box">
-        <h3>已经完成合并</h3>
+        <div class="complete-icon">&#x2713;</div>
+        <h3>冲突已全部处理</h3>
         <p>当前文件的冲突已处理完，可以点击「应用」保存结果。</p>
         <button type="button" class="primary-btn" @click="completeOpen = false">确定</button>
       </div>
@@ -642,14 +924,15 @@ function cancelMerge() {
   background: var(--bg);
 }
 
+/* ── Toolbar ────────────────────────────────────────── */
 .toolbar,
 .foot {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 36px;
-  padding: 0 12px;
+  gap: 6px;
+  min-height: 38px;
+  padding: 0 10px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-hover);
 }
@@ -659,36 +942,80 @@ function cancelMerge() {
   border-top: 1px solid var(--border);
 }
 
-.toolbar-btn {
-  height: 24px;
+.tb-btn {
+  height: 26px;
   padding: 0 8px;
-  border: 1px solid var(--border-soft);
   border-radius: 4px;
-  background: var(--bg-input);
-}
-
-.remain {
-  margin-left: 8px;
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--danger);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
   white-space: nowrap;
 }
 
-.remain.zero {
+.tb-btn:hover:not(:disabled) {
+  background: var(--bg-selected);
+  color: var(--text);
+}
+
+.back-btn {
+  font-weight: 500;
+}
+
+.tb-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border-soft);
+  margin: 0 2px;
+}
+
+.conflict-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 4px;
+  background: rgba(224, 108, 117, 0.15);
+  color: var(--danger);
+  font-weight: 600;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.conflict-badge.resolved {
+  background: rgba(152, 195, 121, 0.15);
   color: var(--ok);
 }
 
-.cover-label {
-  margin-left: 10px;
+.badge-icon {
+  font-size: 14px;
+}
+
+.badge-progress {
   color: var(--text-muted);
+  font-weight: 400;
+  margin-left: 2px;
+}
+
+.apply-btn {
+  color: var(--accent);
+}
+
+.apply-btn:hover:not(:disabled) {
+  background: rgba(53, 116, 240, 0.12);
+  color: var(--accent);
+}
+
+.tb-label {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-left: 2px;
 }
 
 .cover-btn {
-  height: 24px;
-  padding: 0 10px;
   border: 1px solid var(--border-soft);
-  border-radius: 4px;
   background: var(--bg-input);
 }
 
@@ -707,28 +1034,34 @@ function cancelMerge() {
   white-space: nowrap;
   color: var(--text-muted);
   text-align: center;
+  font-size: 12px;
 }
 
-.ws,
-.counts {
+.tb-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tb-count {
+  color: var(--text-dim);
+  font-size: 11px;
   white-space: nowrap;
 }
 
-.ws {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
+/* ── Workspace Grid ─────────────────────────────────── */
 .workspace {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 40px minmax(0, 1fr) 40px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) 36px minmax(0, 1fr) 36px minmax(0, 1fr);
 }
 
-.col,
+.pane-col,
 .gutter-col {
   min-width: 0;
   min-height: 0;
@@ -738,18 +1071,59 @@ function cancelMerge() {
 
 .pane-head {
   flex: none;
-  height: 28px;
+  height: 30px;
   display: flex;
   align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.ours-head {
+  background: var(--diff-ours-head);
+}
+
+.result-head {
+  background: var(--diff-base-head);
+  justify-content: space-between;
+}
+
+.theirs-head {
+  background: var(--diff-theirs-head);
+}
+
+.head-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
   padding: 0 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.ours-badge {
+  background: rgba(53, 116, 240, 0.2);
+  color: #6da3f7;
+}
+
+.result-badge {
+  background: rgba(134, 138, 145, 0.2);
   color: var(--text-muted);
 }
 
-.pane-head.ours { background: var(--diff-ours-head); }
-.pane-head.result {
-  background: var(--diff-base-head);
-  justify-content: space-between;
-  gap: 8px;
+.theirs-badge {
+  background: rgba(73, 156, 84, 0.2);
+  color: #6aab73;
+}
+
+.head-branch {
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .findbar {
@@ -760,102 +1134,80 @@ function cancelMerge() {
 
 .findbar input {
   width: 140px;
-  height: 20px;
+  height: 22px;
   padding: 0 6px;
   border: 1px solid var(--border-soft);
   border-radius: 4px;
   background: var(--bg-input);
   color: var(--text);
+  font-size: 12px;
 }
 
 .findbar button {
-  height: 20px;
-  min-width: 20px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--text-muted);
+  border-radius: 3px;
+}
+
+.findbar button:hover {
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 .findbar em {
   color: var(--danger);
   font-style: normal;
+  font-size: 11px;
 }
 
-.result-pane {
-  padding: 0;
-}
-
-.result-editor {
-  display: block;
-  box-sizing: border-box;
-  width: 100%;
-  min-height: 100%;
-  margin: 0;
-  padding: 0 8px;
-  border: 0;
-  outline: none;
-  resize: none;
-  overflow: hidden;
-  color: var(--text-editor);
-  background: transparent;
-  font-family: Consolas, "Courier New", monospace;
-  font-size: 12px;
-  line-height: 18px;
-  white-space: pre;
-  tab-size: 4;
-}
-.pane-head.theirs { background: var(--diff-theirs-head); }
-
-.pane,
-.gutter-body {
+/* ── Pane Body ──────────────────────────────────────── */
+.pane-body {
   flex: 1;
   min-height: 0;
-}
-
-.pane {
   overflow: scroll;
   scrollbar-gutter: stable both-edges;
-  scrollbar-width: auto;
   background: var(--bg-deep);
   font-family: Consolas, "Courier New", monospace;
   font-size: 12px;
   line-height: 18px;
 }
 
-.pane::-webkit-scrollbar {
-  width: 12px;
-  height: 12px;
+.pane-body::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
 }
 
-.pane::-webkit-scrollbar-thumb {
+.pane-body::-webkit-scrollbar-thumb {
   background: var(--scrollbar);
   border-radius: 8px;
 }
 
-.pane::-webkit-scrollbar-track {
-  background: var(--bg-hover);
+.pane-body::-webkit-scrollbar-track {
+  background: transparent;
 }
 
-.gutter-body {
-  overflow: hidden auto;
-  scrollbar-width: none;
+.result-pane-body {
+  padding: 0;
 }
 
-.gutter-body::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-}
-
-.line,
-.gutter-row {
+/* ── Code Lines ─────────────────────────────────────── */
+.line {
+  display: flex;
   min-height: 18px;
   height: 18px;
 }
 
-.line {
-  display: flex;
+.line.current {
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
-.line.current {
-  box-shadow: inset 2px 0 0 var(--accent);
+.line.conflict-border {
+  box-shadow: inset 3px 0 0 #c754c7, inset -3px 0 0 #c754c7;
+  background: var(--diff-conflict-bg) !important;
 }
 
 .no {
@@ -869,7 +1221,7 @@ function cancelMerge() {
 
 .blame {
   flex: none;
-  width: 118px;
+  width: 120px;
   padding-right: 8px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -884,15 +1236,80 @@ function cancelMerge() {
   min-width: 0;
   padding-right: 8px;
   white-space: pre;
+  color: var(--text-editor);
 }
 
+/* ── Diff Backgrounds ───────────────────────────────── */
 .line.changed { background: var(--diff-changed); }
 .line.added { background: var(--diff-added-bg); }
 .line.deleted { background: var(--diff-deleted-bg); }
 .line.conflict { background: var(--diff-conflict-bg); }
-.line.discarded {
-  opacity: 0.4;
-  background: transparent;
+.line.discarded { opacity: 0.35; background: transparent; }
+
+/* ── Word Diff ──────────────────────────────────────── */
+:deep(.wd) {
+  background: rgba(255, 200, 50, 0.35);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* ── Fold Bar ───────────────────────────────────────── */
+.fold-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 22px;
+  height: 22px;
+  background: var(--bg-hover);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.fold-bar:hover {
+  background: var(--bg-selected);
+  color: var(--text);
+}
+
+.fold-icon {
+  font-size: 14px;
+  line-height: 1;
+  color: var(--text-dim);
+}
+
+.fold-text {
+  white-space: nowrap;
+}
+
+.fold-gutter {
+  min-height: 22px;
+  height: 22px;
+}
+
+/* ── Gutter ─────────────────────────────────────────── */
+.gutter-head {
+  flex: none;
+  height: 30px;
+  background: var(--bg-hover);
+}
+
+.gutter-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden auto;
+  scrollbar-width: none;
+  background: var(--bg-deep);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+
+.gutter-body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .gutter-row {
@@ -900,82 +1317,98 @@ function cancelMerge() {
   align-items: center;
   justify-content: center;
   gap: 2px;
+  min-height: 18px;
+  height: 18px;
 }
 
-.arrow,
-.x {
+.gutter-row.hunk-start {
+  position: relative;
+}
+
+.accept-btn,
+.reject-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.accept-btn {
   width: 18px;
   height: 18px;
-  line-height: 16px;
-  border-radius: 3px;
   color: var(--accent);
-  font-size: 15px;
-  cursor: pointer;
 }
 
-.arrow:hover,
-.arrow.on {
+.accept-btn:hover {
   background: var(--accent);
   color: #fff;
 }
 
-.x {
-  color: var(--text-muted);
+.reject-btn {
+  width: 16px;
+  height: 16px;
+  color: var(--text-dim);
 }
 
-.x:hover {
+.reject-btn:hover {
   background: var(--danger);
   color: #fff;
 }
 
-.err,
-.empty-hint {
-  padding: 16px;
-}
-
-.err {
-  color: var(--danger);
-}
-
-.spacer {
-  flex: 1;
-}
-
-.ctx-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 1380;
-}
-
-.ctx {
-  position: fixed;
-  min-width: 220px;
-  padding: 4px 0;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-elevated);
-  border-radius: 6px;
-  box-shadow: var(--shadow);
-}
-
-.ctx-item {
+/* ── Result Editor ──────────────────────────────────── */
+.result-wrap {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  min-height: 28px;
-  padding: 0 12px;
-  text-align: left;
+  min-height: 100%;
 }
 
-.ctx-item:hover {
-  background: var(--bg-selected);
+.result-lines-col {
+  flex: none;
+  width: 40px;
+  padding: 0 4px 0 0;
+  text-align: right;
+  color: var(--text-dim);
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 18px;
+  user-select: none;
 }
 
-.mark {
-  width: 14px;
-  color: var(--ok);
+.result-no {
+  height: 18px;
+  min-height: 18px;
 }
 
+.result-editor {
+  display: block;
+  flex: 1;
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 100%;
+  margin: 0;
+  padding: 0 8px 0 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  overflow: hidden;
+  color: var(--text-editor);
+  background: transparent;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: pre;
+  tab-size: 4;
+}
+
+/* ── Footer ─────────────────────────────────────────── */
+.spacer { flex: 1; }
+
+.apply-current {
+  gap: 4px;
+}
+
+/* ── Complete Dialog ────────────────────────────────── */
 .complete-mask {
   position: fixed;
   inset: 0;
@@ -988,19 +1421,33 @@ function cancelMerge() {
 
 .complete-box {
   width: min(420px, calc(100vw - 48px));
-  padding: 18px 20px;
+  padding: 24px 28px;
   border-radius: 8px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-elevated);
   box-shadow: var(--shadow);
+  text-align: center;
+}
+
+.complete-icon {
+  font-size: 36px;
+  color: var(--ok);
+  margin-bottom: 8px;
 }
 
 .complete-box h3 {
   margin: 0 0 8px;
+  font-size: 16px;
 }
 
 .complete-box p {
-  margin: 0 0 16px;
+  margin: 0 0 20px;
   color: var(--text-muted);
+}
+
+/* ── Utility ────────────────────────────────────────── */
+.err {
+  padding: 16px;
+  color: var(--danger);
 }
 </style>

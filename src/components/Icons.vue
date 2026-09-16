@@ -43,6 +43,8 @@ defineProps<{ name: string; size?: number }>();
     <circle v-if="name === 'circle'" cx="8" cy="8" r="3.2" />
     <path v-if="name === 'sparkle'" d="M8 1.5l1.1 3.4L12.5 6 9.1 7.1 8 10.5 6.9 7.1 3.5 6l3.4-1.1zM12.5 10l.6 1.6L14.8 12l-1.7.5-.6 1.7-.5-1.7L10.3 12l1.7-.4z" fill="currentColor" stroke="none" />
     <path v-if="name === 'terminal'" d="M2.5 3.5h11v9h-11zM5 6.5l2 1.5-2 1.5M8.5 10h3" />
+    <path v-if="name === 'arrow-left'" d="M13 8H3M7 4L3 8l4 4" />
+    <path v-if="name === 'check'" d="M3 8.5l3 3 7-7" />
     <path v-if="name === 'copy'" d="M6 4.5h6.5V13H6zM3.5 3h6.5v1.5" />
   </svg>
 </template>

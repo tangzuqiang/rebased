@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import "highlight.js/styles/atom-one-dark.css";
-import { absWorktreePath, listWorktree, openInOs, previewFile, revealInOs, saveWorktreeFile } from "../api";
+import { absWorktreePath, copyWorktree, deleteWorktree, listWorktree, openInOs, previewFile, renameWorktree, revealInOs, saveWorktreeFile } from "../api";
 import { commentPrefix, findInTextarea, handleIdeEditorKey, writeTextarea } from "../editorKeys";
 import { languageFromPath } from "../highlight";
 import { notify } from "../notify";
 import type { FilePreview } from "../types";
 import Icons from "./Icons.vue";
+import Modal from "./Modal.vue";
 
 interface TreeNode {
   name: string;
@@ -57,6 +58,10 @@ const editorEl = ref<HTMLTextAreaElement | null>(null);
 const findOpen = ref(false);
 const findQuery = ref("");
 const findHint = ref("");
+const fileDialog = ref<"" | "copy" | "rename">("");
+const fileDialogName = ref("");
+const fileDialogNode = ref<TreeNode | null>(null);
+const fileBusy = ref(false);
 
 const visible = computed(() => flatten(tree.value, query.value.trim().toLowerCase(), expanded.value));
 const lineCount = computed(() => (draft.value ? draft.value.split("\n").length : 0));
@@ -127,13 +132,14 @@ function formatSize(size: number) {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-async function loadTree() {
+async function loadTree(keepExpanded = false) {
   loadingTree.value = true;
   treeError.value = "";
+  const keep = keepExpanded ? new Set(expanded.value) : new Set<string>();
   try {
     const paths = await listWorktree(props.repoPath);
     tree.value = buildTree(paths);
-    expanded.value = new Set();
+    expanded.value = keep;
   } catch (error) {
     treeError.value = error instanceof Error ? error.message : String(error);
     tree.value = [];
@@ -210,7 +216,7 @@ function openMenu(event: MouseEvent, node: TreeNode) {
   event.stopPropagation();
   selected.value = node.path;
   const width = 228;
-  const height = node.dir ? 76 : 104;
+  const height = node.dir ? 168 : 196;
   const x = Math.min(event.clientX, window.innerWidth - width - 8);
   const y = Math.min(event.clientY, window.innerHeight - height - 8);
   menu.value = {
@@ -221,6 +227,115 @@ function openMenu(event: MouseEvent, node: TreeNode) {
     sub: false,
     subLeft: event.clientX > window.innerWidth - 460,
   };
+}
+
+function parentDir(path: string) {
+  const index = path.lastIndexOf("/");
+  return index < 0 ? "" : path.slice(0, index);
+}
+
+function joinRel(dir: string, name: string) {
+  const clean = name.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  return dir ? `${dir}/${clean}` : clean;
+}
+
+function suggestedCopyName(name: string) {
+  const index = name.lastIndexOf(".");
+  if (index > 0) return `${name.slice(0, index)} - 副本${name.slice(index)}`;
+  return `${name} - 副本`;
+}
+
+function underPath(child: string, parent: string) {
+  return child === parent || child.startsWith(`${parent}/`);
+}
+
+function openFileDialog(kind: "copy" | "rename") {
+  const node = menu.value.node;
+  closeMenu();
+  if (!node) return;
+  fileDialogNode.value = node;
+  fileDialogName.value = kind === "copy" ? suggestedCopyName(node.name) : node.name;
+  fileDialog.value = kind;
+}
+
+function closeFileDialog() {
+  if (fileBusy.value) return;
+  fileDialog.value = "";
+  fileDialogNode.value = null;
+}
+
+async function confirmFileDialog() {
+  const node = fileDialogNode.value;
+  const name = fileDialogName.value.trim();
+  if (!node || !name || fileBusy.value) return;
+  if (name.includes("..") || name.includes("/") || name.includes("\\")) {
+    notify("名称不能包含路径分隔符", "error");
+    return;
+  }
+  const dest = joinRel(parentDir(node.path), name);
+  if (dest === node.path) {
+    closeFileDialog();
+    return;
+  }
+  const copying = fileDialog.value === "copy";
+  fileBusy.value = true;
+  try {
+    const next = copying
+      ? await copyWorktree(props.repoPath, node.path, dest)
+      : await renameWorktree(props.repoPath, node.path, dest);
+    const dir = parentDir(next);
+    if (dir) {
+      const keep = new Set(expanded.value);
+      keep.add(dir);
+      expanded.value = keep;
+    }
+    if (!copying && (selected.value === node.path || underPath(selected.value, node.path))) {
+      selected.value = "";
+      preview.value = null;
+      draft.value = "";
+      savedContent.value = "";
+      if (!node.dir) {
+        fileDialog.value = "";
+        fileDialogNode.value = null;
+        await loadTree(true);
+        emit("changed");
+        notify(`已重命名为 ${next}`);
+        await openFile(next);
+        return;
+      }
+    }
+    fileDialog.value = "";
+    fileDialogNode.value = null;
+    await loadTree(true);
+    emit("changed");
+    notify(copying ? `已复制为 ${next}` : `已重命名为 ${next}`);
+  } catch (error) {
+    notify(error instanceof Error ? error.message : String(error), "error");
+  } finally {
+    fileBusy.value = false;
+  }
+}
+
+async function deleteCurrent() {
+  const node = menu.value.node;
+  closeMenu();
+  if (!node) return;
+  const label = node.dir ? `目录「${node.name}」及其全部内容` : `「${node.name}」`;
+  if (!window.confirm(`确定删除${label}？此操作不可恢复。`)) return;
+  try {
+    await deleteWorktree(props.repoPath, node.path);
+    if (selected.value === node.path || underPath(selected.value, node.path)) {
+      selected.value = "";
+      preview.value = null;
+      draft.value = "";
+      savedContent.value = "";
+    }
+    await loadTree(true);
+    emit("changed");
+    notify(`已删除 ${node.path}`);
+  } catch (error) {
+    notify(error instanceof Error ? error.message : String(error), "error");
+  }
 }
 
 function onRow(node: TreeNode) {
@@ -361,7 +476,7 @@ watch(
       <aside class="tree">
         <header>
           <strong>项目</strong>
-          <button type="button" class="icon-btn" title="刷新" @click="loadTree">
+          <button type="button" class="icon-btn" title="刷新" @click="loadTree()">
             <Icons name="refresh" :size="13" />
           </button>
         </header>
@@ -460,6 +575,9 @@ watch(
             在预览中打开
           </button>
           <button type="button" @click="copyPath">复制路径</button>
+          <button type="button" @click="openFileDialog('copy')">复制…</button>
+          <button type="button" @click="openFileDialog('rename')">重命名…</button>
+          <button type="button" @click="deleteCurrent">删除</button>
           <div class="divider" />
           <div class="sub-wrap" @mouseenter="menu.sub = true">
             <button type="button" class="sub-btn" :class="{ open: menu.sub }" @click.stop="menu.sub = !menu.sub">
@@ -478,6 +596,21 @@ watch(
           </div>
         </div>
       </div>
+
+      <Modal
+        v-if="fileDialog"
+        :title="fileDialog === 'copy' ? '复制' : '重命名'"
+        @close="closeFileDialog"
+      >
+        <p>将 <strong>{{ fileDialogNode?.path }}</strong> {{ fileDialog === "copy" ? "复制为" : "重命名为" }}：</p>
+        <label>新名称 <input v-model="fileDialogName" @keydown.enter.prevent="confirmFileDialog" /></label>
+        <template #footer>
+          <button type="button" class="secondary-btn" :disabled="fileBusy" @click="closeFileDialog">取消</button>
+          <button type="button" class="primary-btn" :disabled="fileBusy || !fileDialogName.trim()" @click="confirmFileDialog">
+            {{ fileDialog === "copy" ? "复制" : "重命名" }}
+          </button>
+        </template>
+      </Modal>
 
       <div v-if="pathWindow" class="ctx-mask" @mousedown="pathWindow = ''">
         <div class="path-box" @mousedown.stop>

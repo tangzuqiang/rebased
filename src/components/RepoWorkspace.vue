@@ -1,9 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import {
+  addRemote,
+  addWorktree,
+  applyPatch,
   checkoutBranch,
   commitChanges,
   createBranchAt,
+  deleteBranch,
+  deleteTag,
   fetchRemote,
   getBranches,
   getCommitFiles,
@@ -12,14 +17,20 @@ import {
   getMergeState,
   getRepo,
   getStatus,
+  listWorktree,
   mergeAbort,
   mergeBranch,
   mergeContinue,
   openRepo,
   pullRemote,
+  pushTag,
   pushTo,
+  remoteDetails,
+  removeRemote,
+  removeWorktree,
   renameBranch,
   resolveConflict,
+  setRemoteUrl,
   setUpstream,
   unwatchRepo,
   updateBranch,
@@ -28,11 +39,12 @@ import {
   writeResolved,
 } from "../api";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { buildGraph } from "../graph";
 import { notify } from "../notify";
 import { sameRepo } from "../path";
 import type { BranchMenuAction } from "./BranchFilterList.vue";
-import type { BranchInfo, FileDiff, GitCommit, GitFile, MergeState, RecentProject, RepoInfo } from "../types";
+import type { BranchInfo, FileDiff, GitCommit, GitFile, MergeState, RecentProject, RemoteDetail, RepoInfo } from "../types";
 import CommitDialog from "./CommitDialog.vue";
 import ConflictsDialog from "./ConflictsDialog.vue";
 import ErrorDialog from "./ErrorDialog.vue";
@@ -98,6 +110,17 @@ const branchError = ref("");
 const logLoading = ref(false);
 const actionError = ref("");
 const actionErrorTitle = ref("操作失败");
+const logPanel = ref<InstanceType<typeof LogPanel> | null>(null);
+const showRemoteDialog = ref(false);
+const remoteList = ref<RemoteDetail[]>([]);
+const remoteFormName = ref("");
+const remoteFormUrl = ref("");
+const remoteEditing = ref("");
+const showWorktreeDialog = ref(false);
+const worktreeList = ref<string[]>([]);
+const worktreePath = ref("");
+const worktreeBranch = ref("");
+const worktreeCreateNew = ref(false);
 
 const graph = computed(() => buildGraph(commits.value));
 const repoPath = computed(() => repo.value?.path ?? props.path);
@@ -493,6 +516,37 @@ async function handleBranchAction(payload: { action: BranchMenuAction; branch: B
       notify(message);
     }
   }
+  if (payload.action === "delete") {
+    const message = await withBusy(`正在删除分支 ${payload.branch.name}…`, async () => {
+      const result = await deleteBranch(repoPath.value, payload.branch.name, false).catch(() =>
+        deleteBranch(repoPath.value, payload.branch.name, true),
+      );
+      repo.value = await openRepo(repoPath.value);
+      selectedHash.value = "";
+      await refreshAll();
+      return result;
+    }, { errorPopup: true, errorTitle: "删除分支失败" });
+    if (message) notify(message);
+    return;
+  }
+  if (payload.action === "delete-tag") {
+    const message = await withBusy(`正在删除标签 ${payload.branch.name}…`, async () => {
+      const result = await deleteTag(repoPath.value, payload.branch.name);
+      repo.value = await openRepo(repoPath.value);
+      selectedHash.value = "";
+      await refreshAll();
+      return result;
+    }, { errorPopup: true, errorTitle: "删除标签失败" });
+    if (message) notify(message);
+    return;
+  }
+  if (payload.action === "push-tag") {
+    const message = await withBusy(`正在推送标签 ${payload.branch.name}…`, async () => {
+      const result = await pushTag(repoPath.value, "origin", payload.branch.name);
+      return result;
+    }, { errorPopup: true, errorTitle: "推送标签失败" });
+    if (message) notify(message);
+  }
 }
 
 async function confirmNewBranch() {
@@ -635,6 +689,125 @@ function openConflicts() {
   }
 }
 
+function focusSearch() {
+  logPanel.value?.focusSearch();
+}
+
+async function openRemoteDialog() {
+  try {
+    remoteList.value = await remoteDetails(repoPath.value);
+  } catch {
+    remoteList.value = [];
+  }
+  remoteFormName.value = "";
+  remoteFormUrl.value = "";
+  remoteEditing.value = "";
+  showRemoteDialog.value = true;
+}
+
+async function confirmAddRemote() {
+  const name = remoteFormName.value.trim();
+  const url = remoteFormUrl.value.trim();
+  if (!name || !url) return;
+  const message = await withBusy("正在添加远程…", async () => {
+    const result = await addRemote(repoPath.value, name, url);
+    remoteList.value = await remoteDetails(repoPath.value);
+    remoteFormName.value = "";
+    remoteFormUrl.value = "";
+    return result;
+  }, { errorPopup: true, errorTitle: "添加远程失败" });
+  if (message) notify(message);
+}
+
+async function confirmRemoveRemote(name: string) {
+  const message = await withBusy(`正在移除远程 ${name}…`, async () => {
+    const result = await removeRemote(repoPath.value, name);
+    remoteList.value = await remoteDetails(repoPath.value);
+    await refreshAll();
+    return result;
+  }, { errorPopup: true, errorTitle: "移除远程失败" });
+  if (message) notify(message);
+}
+
+async function startEditRemote(name: string) {
+  remoteEditing.value = name;
+  const detail = remoteList.value.find((r) => r.name === name);
+  remoteFormUrl.value = detail?.url ?? "";
+}
+
+async function confirmEditRemoteUrl() {
+  const name = remoteEditing.value;
+  const url = remoteFormUrl.value.trim();
+  if (!name || !url) return;
+  const message = await withBusy("正在更新远程 URL…", async () => {
+    const result = await setRemoteUrl(repoPath.value, name, url);
+    remoteList.value = await remoteDetails(repoPath.value);
+    remoteEditing.value = "";
+    return result;
+  }, { errorPopup: true, errorTitle: "更新远程 URL 失败" });
+  if (message) notify(message);
+}
+
+async function handleApplyPatch() {
+  const selected = await openFileDialog({
+    title: "选择补丁文件",
+    filters: [{ name: "补丁文件", extensions: ["patch", "diff"] }],
+  });
+  if (!selected) return;
+  const message = await withBusy("正在应用补丁…", async () => {
+    const result = await applyPatch(repoPath.value, selected);
+    await refreshAll();
+    return result;
+  }, { errorPopup: true, errorTitle: "应用补丁失败" });
+  if (message) notify(message);
+}
+
+async function openWorktreeDialog() {
+  try {
+    worktreeList.value = await listWorktree(repoPath.value);
+  } catch {
+    worktreeList.value = [];
+  }
+  worktreePath.value = "";
+  worktreeBranch.value = "";
+  worktreeCreateNew.value = false;
+  showWorktreeDialog.value = true;
+}
+
+async function confirmAddWorktree() {
+  const path = worktreePath.value.trim();
+  const branch = worktreeBranch.value.trim();
+  if (!path || !branch) return;
+  const message = await withBusy("正在添加工作树…", async () => {
+    const result = await addWorktree(repoPath.value, path, branch, worktreeCreateNew.value);
+    worktreeList.value = await listWorktree(repoPath.value);
+    worktreePath.value = "";
+    worktreeBranch.value = "";
+    return result;
+  }, { errorPopup: true, errorTitle: "添加工作树失败" });
+  if (message) notify(message);
+}
+
+async function confirmRemoveWorktree(path: string) {
+  const message = await withBusy(`正在移除工作树…`, async () => {
+    const result = await removeWorktree(repoPath.value, path);
+    worktreeList.value = await listWorktree(repoPath.value);
+    return result;
+  }, { errorPopup: true, errorTitle: "移除工作树失败" });
+  if (message) notify(message);
+}
+
+async function pickWorktreePath() {
+  const selected = await openFileDialog({
+    title: "选择工作树目录",
+    directory: true,
+    multiple: false,
+  });
+  if (selected && !Array.isArray(selected)) {
+    worktreePath.value = selected;
+  }
+}
+
 function toggleTerminal() {
   showTerminal.value = !showTerminal.value;
   if (showTerminal.value) {
@@ -739,6 +912,10 @@ onUnmounted(() => {
         @new-branch="openNewBranchFromCurrent"
         @conflicts="openConflicts"
         @settings="emit('settings')"
+        @search="focusSearch"
+        @remotes="openRemoteDialog"
+        @patch="handleApplyPatch"
+        @worktrees="openWorktreeDialog"
         @branch-action="handleBranchAction"
       />
       <FilePreviewDrawer
@@ -750,6 +927,7 @@ onUnmounted(() => {
       />
       <main v-else class="workspace">
         <LogPanel
+          ref="logPanel"
           :repo="repo"
           :commits="commits"
           :graph="graph"
@@ -866,6 +1044,65 @@ onUnmounted(() => {
         @save="handleSaveResolved"
         @abort="handleAbortMerge"
       />
+      <Modal v-if="showRemoteDialog" title="管理远程仓库" medium @close="showRemoteDialog = false">
+        <div class="list-rows">
+          <div v-for="r in remoteList" :key="r.name" class="list-row">
+            <div class="row-main">
+              <strong>{{ r.name }}</strong>
+              <template v-if="remoteEditing === r.name">
+                <input v-model="remoteFormUrl" class="row-input" @keyup.enter="confirmEditRemoteUrl" />
+                <button type="button" class="row-btn" @click="confirmEditRemoteUrl">保存</button>
+                <button type="button" class="row-btn muted" @click="remoteEditing = ''">取消</button>
+              </template>
+              <template v-else>
+                <span class="row-url">{{ r.url }}</span>
+                <button type="button" class="row-btn" @click="startEditRemote(r.name)">编辑</button>
+                <button type="button" class="row-btn danger" @click="confirmRemoveRemote(r.name)">移除</button>
+              </template>
+            </div>
+          </div>
+          <p v-if="!remoteList.length" class="muted">暂无远程仓库</p>
+        </div>
+        <div class="add-form">
+          <input v-model="remoteFormName" placeholder="名称" class="form-input" />
+          <input v-model="remoteFormUrl" placeholder="URL" class="form-input grow" />
+          <button type="button" class="primary-btn" :disabled="busy || !remoteFormName.trim() || !remoteFormUrl.trim()" @click="confirmAddRemote">
+            <span v-if="busy" class="btn-spinner" />
+            添加
+          </button>
+        </div>
+        <template #footer>
+          <button type="button" class="primary-btn" @click="showRemoteDialog = false">关闭</button>
+        </template>
+      </Modal>
+      <Modal v-if="showWorktreeDialog" title="管理工作树" medium @close="showWorktreeDialog = false">
+        <div class="list-rows">
+          <div v-for="wt in worktreeList" :key="wt" class="list-row">
+            <div class="row-main">
+              <span class="row-url">{{ wt }}</span>
+              <button type="button" class="row-btn danger" @click="confirmRemoveWorktree(wt)">移除</button>
+            </div>
+          </div>
+          <p v-if="!worktreeList.length" class="muted">暂无工作树</p>
+        </div>
+        <div class="add-form">
+          <div class="form-row">
+            <input v-model="worktreePath" placeholder="目录路径" class="form-input grow" />
+            <button type="button" class="row-btn" @click="pickWorktreePath">浏览…</button>
+          </div>
+          <div class="form-row">
+            <input v-model="worktreeBranch" placeholder="分支名" class="form-input grow" />
+            <label class="check-label"><input v-model="worktreeCreateNew" type="checkbox" /> 新建分支</label>
+          </div>
+          <button type="button" class="primary-btn" :disabled="busy || !worktreePath.trim() || !worktreeBranch.trim()" @click="confirmAddWorktree">
+            <span v-if="busy" class="btn-spinner" />
+            添加
+          </button>
+        </div>
+        <template #footer>
+          <button type="button" class="primary-btn" @click="showWorktreeDialog = false">关闭</button>
+        </template>
+      </Modal>
     </template>
     <div v-else class="empty-hint">正在打开仓库…</div>
   </div>
@@ -938,5 +1175,122 @@ label input:not([type="checkbox"]) {
 
 .err {
   color: var(--danger);
+}
+
+.list-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+
+.list-row {
+  display: flex;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border-soft);
+}
+
+.row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.row-url {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.row-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  border: 1px solid var(--border-soft);
+  background: var(--bg-input);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 12px;
+}
+
+.row-btn {
+  padding: 2px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border-soft);
+  background: var(--bg-elevated);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.row-btn:hover {
+  background: var(--bg-hover);
+}
+
+.row-btn.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.row-btn.danger:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+.row-btn.muted {
+  color: var(--muted);
+}
+
+.add-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.form-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.form-input {
+  height: 30px;
+  border: 1px solid var(--border-soft);
+  background: var(--bg-input);
+  border-radius: 4px;
+  padding: 0 8px;
+  font-size: 13px;
+}
+
+.form-input.grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.check-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 12px;
 }
 </style>

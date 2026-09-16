@@ -682,6 +682,26 @@ pub fn remotes(repo: &Path) -> Result<Vec<String>, String> {
         .collect())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteDetail {
+    pub name: String,
+    pub url: String,
+}
+
+pub fn remote_details(repo: &Path) -> Result<Vec<RemoteDetail>, String> {
+    let names = remotes(repo)?;
+    let mut out = Vec::new();
+    for name in names {
+        let url = run_git(repo, &["remote", "get-url", &name]).unwrap_or_default();
+        out.push(RemoteDetail {
+            name,
+            url: url.trim().to_string(),
+        });
+    }
+    Ok(out)
+}
+
 pub fn push_to(repo: &Path, remote: &str, branch: &str) -> Result<String, String> {
     if remote.trim().is_empty() {
         return push(repo);
@@ -1403,6 +1423,95 @@ pub fn create_branch_at(repo: &Path, name: &str, hash: &str, checkout: bool) -> 
     Ok(format!("已创建分支 {name}"))
 }
 
+pub fn delete_branch(repo: &Path, name: &str, force: bool) -> Result<String, String> {
+    if name.trim().is_empty() {
+        return Err("请输入分支名".to_string());
+    }
+    let flag = if force { "-D" } else { "-d" };
+    run_git(repo, &["branch", flag, name.trim()])?;
+    Ok(format!("已删除分支 {name}"))
+}
+
+pub fn delete_tag(repo: &Path, name: &str) -> Result<String, String> {
+    if name.trim().is_empty() {
+        return Err("请输入标签名".to_string());
+    }
+    run_git(repo, &["tag", "-d", name.trim()])?;
+    Ok(format!("已删除标签 {name}"))
+}
+
+pub fn push_tag(repo: &Path, remote: &str, name: &str) -> Result<String, String> {
+    if name.trim().is_empty() {
+        return Err("请输入标签名".to_string());
+    }
+    let remote = if remote.trim().is_empty() { "origin" } else { remote.trim() };
+    run_git(repo, &["push", remote, name.trim()])?;
+    Ok(format!("已推送标签 {name}"))
+}
+
+pub fn add_remote(repo: &Path, name: &str, url: &str) -> Result<String, String> {
+    if name.trim().is_empty() {
+        return Err("请输入远程名称".to_string());
+    }
+    if url.trim().is_empty() {
+        return Err("请输入远程 URL".to_string());
+    }
+    run_git(repo, &["remote", "add", name.trim(), url.trim()])?;
+    Ok(format!("已添加远程 {}", name.trim()))
+}
+
+pub fn remove_remote(repo: &Path, name: &str) -> Result<String, String> {
+    if name.trim().is_empty() {
+        return Err("请输入远程名称".to_string());
+    }
+    run_git(repo, &["remote", "remove", name.trim()])?;
+    Ok(format!("已移除远程 {}", name.trim()))
+}
+
+pub fn set_remote_url(repo: &Path, name: &str, url: &str) -> Result<String, String> {
+    if name.trim().is_empty() {
+        return Err("请输入远程名称".to_string());
+    }
+    if url.trim().is_empty() {
+        return Err("请输入远程 URL".to_string());
+    }
+    run_git(repo, &["remote", "set-url", name.trim(), url.trim()])?;
+    Ok(format!("已更新远程 {} 的 URL", name.trim()))
+}
+
+pub fn apply_patch(repo: &Path, path: &str) -> Result<String, String> {
+    if path.trim().is_empty() {
+        return Err("请选择补丁文件".to_string());
+    }
+    run_git(repo, &["apply", "--ignore-whitespace", path])?;
+    Ok(format!("已应用补丁 {}", Path::new(path).file_name().unwrap_or_default().to_string_lossy()))
+}
+
+pub fn add_worktree(repo: &Path, path: &str, branch: &str, create_branch: bool) -> Result<String, String> {
+    if path.trim().is_empty() {
+        return Err("请输入工作树路径".to_string());
+    }
+    if branch.trim().is_empty() {
+        return Err("请输入分支名".to_string());
+    }
+    let mut args = vec!["worktree", "add"];
+    if create_branch {
+        args.push("-b");
+    }
+    args.push(path.trim());
+    args.push(branch.trim());
+    run_git(repo, &args)?;
+    Ok(format!("已添加工作树 {}", path.trim()))
+}
+
+pub fn remove_worktree(repo: &Path, path: &str) -> Result<String, String> {
+    if path.trim().is_empty() {
+        return Err("请输入工作树路径".to_string());
+    }
+    run_git(repo, &["worktree", "remove", path.trim(), "--force"])?;
+    Ok(format!("已移除工作树 {}", path.trim()))
+}
+
 pub fn create_tag_at(repo: &Path, name: &str, hash: &str) -> Result<String, String> {
     if name.trim().is_empty() {
         return Err("请输入标签名".to_string());
@@ -1434,20 +1543,129 @@ pub struct FilePreview {
 
 const PREVIEW_LIMIT: usize = 512 * 1024;
 
-fn resolve_worktree_file(repo: &Path, rel: &str) -> Result<(String, PathBuf), String> {
-    let rel = rel.replace('\\', "/");
+fn normalize_rel(rel: &str) -> Result<String, String> {
+    let rel = rel.replace('\\', "/").trim_matches('/').to_string();
     if rel.is_empty() || rel.contains("..") || Path::new(&rel).is_absolute() {
         return Err("无效的文件路径".to_string());
     }
-    let repo_root = repo
-        .canonicalize()
-        .map_err(|e| format!("无法解析仓库路径：{e}"))?;
+    if rel
+        .split('/')
+        .any(|part| part.is_empty() || part.eq_ignore_ascii_case(".git"))
+    {
+        return Err("无效的文件路径".to_string());
+    }
+    Ok(rel)
+}
+
+fn repo_root(repo: &Path) -> Result<PathBuf, String> {
+    repo.canonicalize()
+        .map_err(|e| format!("无法解析仓库路径：{e}"))
+}
+
+fn ensure_inside(root: &Path, path: &Path) -> Result<(), String> {
+    let mut cur = path;
+    loop {
+        if cur.exists() {
+            let canon = cur
+                .canonicalize()
+                .map_err(|e| format!("无法解析路径：{e}"))?;
+            if !canon.starts_with(root) {
+                return Err("文件不在仓库内".to_string());
+            }
+            return Ok(());
+        }
+        match cur.parent() {
+            Some(parent) if parent != cur => cur = parent,
+            _ => return Err("文件不在仓库内".to_string()),
+        }
+    }
+}
+
+fn resolve_worktree_file(repo: &Path, rel: &str) -> Result<(String, PathBuf), String> {
+    let rel = normalize_rel(rel)?;
+    let repo_root = repo_root(repo)?;
     let full = repo_root.join(&rel);
     let canonical = full.canonicalize().map_err(|_| "文件不存在".to_string())?;
     if !canonical.starts_with(&repo_root) {
         return Err("文件不在仓库内".to_string());
     }
     Ok((rel, canonical))
+}
+
+fn resolve_worktree_dest(repo: &Path, rel: &str) -> Result<(String, PathBuf), String> {
+    let rel = normalize_rel(rel)?;
+    let repo_root = repo_root(repo)?;
+    let full = repo_root.join(&rel);
+    ensure_inside(&repo_root, &full)?;
+    Ok((rel, full))
+}
+
+fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(to).map_err(|e| format!("无法创建目录：{e}"))?;
+    for entry in std::fs::read_dir(from).map_err(|e| format!("无法读取目录：{e}"))? {
+        let entry = entry.map_err(|e| format!("无法读取目录：{e}"))?;
+        if entry.file_name().eq_ignore_ascii_case(".git") {
+            continue;
+        }
+        let src = entry.path();
+        let dest = to.join(entry.file_name());
+        if src.is_dir() {
+            copy_dir(&src, &dest)?;
+        } else {
+            std::fs::copy(&src, &dest).map_err(|e| format!("复制失败：{e}"))?;
+        }
+    }
+    Ok(())
+}
+
+pub fn copy_worktree(repo: &Path, src: &str, dest: &str) -> Result<String, String> {
+    let (_, src_path) = resolve_worktree_file(repo, src)?;
+    let (dest_rel, dest_path) = resolve_worktree_dest(repo, dest)?;
+    if dest_path.exists() {
+        return Err("目标已存在".to_string());
+    }
+    if src_path.is_dir() {
+        let src_canon = src_path
+            .canonicalize()
+            .map_err(|e| format!("无法解析路径：{e}"))?;
+        if dest_path.starts_with(&src_canon) {
+            return Err("不能复制到自身目录内".to_string());
+        }
+        copy_dir(&src_path, &dest_path)?;
+    } else {
+        if let Some(parent) = dest_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("无法创建目录：{e}"))?;
+        }
+        std::fs::copy(&src_path, &dest_path).map_err(|e| format!("复制失败：{e}"))?;
+    }
+    Ok(dest_rel)
+}
+
+pub fn rename_worktree(repo: &Path, src: &str, dest: &str) -> Result<String, String> {
+    let (_, src_path) = resolve_worktree_file(repo, src)?;
+    let (dest_rel, dest_path) = resolve_worktree_dest(repo, dest)?;
+    if dest_path.exists() {
+        return Err("目标已存在".to_string());
+    }
+    if let Some(parent) = dest_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("无法创建目录：{e}"))?;
+    }
+    std::fs::rename(&src_path, &dest_path).map_err(|e| format!("重命名失败：{e}"))?;
+    Ok(dest_rel)
+}
+
+pub fn delete_worktree(repo: &Path, rel: &str) -> Result<(), String> {
+    let (_, path) = resolve_worktree_file(repo, rel)?;
+    let root = repo_root(repo)?;
+    if path == root {
+        return Err("不能删除仓库根目录".to_string());
+    }
+    if path.is_dir() {
+        std::fs::remove_dir_all(&path).map_err(|e| format!("删除失败：{e}"))?;
+    } else {
+        std::fs::remove_file(&path).map_err(|e| format!("删除失败：{e}"))?;
+    }
+    Ok(())
 }
 
 pub fn list_worktree(repo: &Path) -> Result<Vec<String>, String> {
