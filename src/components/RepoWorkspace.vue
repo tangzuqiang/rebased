@@ -30,11 +30,12 @@ import type { BranchMenuAction } from "./BranchFilterList.vue";
 import type { BranchInfo, FileDiff, GitCommit, GitFile, MergeState, RecentProject, RepoInfo } from "../types";
 import CommitDialog from "./CommitDialog.vue";
 import ConflictsDialog from "./ConflictsDialog.vue";
+import ErrorDialog from "./ErrorDialog.vue";
 import FilePreviewDrawer from "./FilePreviewDrawer.vue";
 import FilesPanel from "./FilesPanel.vue";
 import LogPanel from "./LogPanel.vue";
 import MergeDialog from "./MergeDialog.vue";
-import ResolveConflictDialog from "./ResolveConflictDialog.vue";
+import MergeEditorPage from "./MergeEditorPage.vue";
 import PushDialog from "./PushDialog.vue";
 import Modal from "./Modal.vue";
 import StatusBar from "./StatusBar.vue";
@@ -76,6 +77,7 @@ const showCommit = ref(false);
 const showPush = ref(false);
 const showMerge = ref(false);
 const showConflicts = ref(false);
+const mergeEditPath = ref("");
 const conflictState = ref<MergeState | null>(null);
 const resolvePath = ref("");
 const loaded = ref(false);
@@ -88,6 +90,9 @@ const actionName = ref("");
 const checkoutNewBranch = ref(true);
 const branchDiff = ref<FileDiff | null>(null);
 const branchError = ref("");
+const logLoading = ref(false);
+const actionError = ref("");
+const actionErrorTitle = ref("操作失败");
 
 const graph = computed(() => buildGraph(commits.value));
 const repoPath = computed(() => repo.value?.path ?? props.path);
@@ -103,7 +108,11 @@ function emitMeta() {
   });
 }
 
-async function withBusy<T>(label: string, task: () => Promise<T>): Promise<T | undefined> {
+async function withBusy<T>(
+  label: string,
+  task: () => Promise<T>,
+  options?: { errorPopup?: boolean; errorTitle?: string },
+): Promise<T | undefined> {
   busy.value = true;
   statusText.value = label;
   errorText.value = "";
@@ -117,21 +126,24 @@ async function withBusy<T>(label: string, task: () => Promise<T>): Promise<T | u
     const message = error instanceof Error ? error.message : String(error);
     errorText.value = message;
     statusText.value = "失败";
-    notify(message, "error");
+    if (options?.errorPopup) {
+      actionErrorTitle.value = options.errorTitle || "操作失败";
+      actionError.value = message;
+    } else {
+      notify(message, "error");
+    }
     return undefined;
   } finally {
     busy.value = false;
   }
 }
 
-async function refreshAll() {
+async function refreshCore() {
   if (!repo.value) return;
   const current = repoPath.value;
   const errors: string[] = [];
-  const [statusResult, logResult, branchResult, recentResult] = await Promise.allSettled([
+  const [statusResult, recentResult] = await Promise.allSettled([
     getStatus(current),
-    getLog(current, 200, logRefs.value),
-    getBranches(current),
     getRecentBranches(current, 4),
   ]);
 
@@ -142,33 +154,59 @@ async function refreshAll() {
     errors.push(String(statusResult.reason));
   }
 
-  if (logResult.status === "fulfilled") {
-    commits.value = logResult.value;
-    if (!selectedHash.value && logResult.value[0]) {
-      selectedHash.value = logResult.value[0].hash;
-    }
-  } else {
-    errors.push(String(logResult.reason));
-  }
-
-  if (branchResult.status === "fulfilled") {
-    branches.value = branchResult.value;
-  } else {
-    errors.push(String(branchResult.reason));
-  }
-
   if (recentResult.status === "fulfilled") {
     recentBranches.value = recentResult.value.slice(0, 4);
   }
 
-  if (selectedHash.value) {
-    commitFiles.value = await getCommitFiles(current, selectedHash.value).catch(() => []);
-  }
+  await syncMergeState(false);
+  emitMeta();
   if (errors.length) {
     throw new Error(errors.join("；"));
   }
-  await syncMergeState(false);
-  emitMeta();
+}
+
+async function refreshLog() {
+  if (!repo.value) return;
+  const current = repoPath.value;
+  logLoading.value = true;
+  try {
+    const logResult = await getLog(current, 200, logRefs.value);
+    if (current !== repoPath.value) return;
+    commits.value = logResult;
+    if (!selectedHash.value && logResult[0]) {
+      selectedHash.value = logResult[0].hash;
+    }
+    if (selectedHash.value) {
+      commitFiles.value = await getCommitFiles(current, selectedHash.value).catch(() => []);
+    }
+  } catch (error) {
+    if (!commits.value.length) {
+      errorText.value = error instanceof Error ? error.message : String(error);
+    }
+  } finally {
+    if (current === repoPath.value) {
+      logLoading.value = false;
+    }
+  }
+}
+
+async function refreshBranches() {
+  if (!repo.value) return;
+  const current = repoPath.value;
+  const list = await getBranches(current).catch(() => null);
+  if (list && current === repoPath.value) {
+    branches.value = list;
+  }
+}
+
+function refreshBackground() {
+  void refreshLog();
+  void refreshBranches();
+}
+
+async function refreshAll() {
+  await refreshCore();
+  refreshBackground();
 }
 
 async function syncMergeState(openIfNeeded: boolean) {
@@ -184,6 +222,7 @@ async function syncMergeState(openIfNeeded: boolean) {
   conflictState.value = null;
   showConflicts.value = false;
   resolvePath.value = "";
+  mergeEditPath.value = "";
   emitMeta();
 }
 
@@ -244,29 +283,37 @@ async function handleCommit(payload: {
   paths: string[];
   push: boolean;
 }) {
-  const ok = await withBusy(payload.push ? "正在提交并推送…" : "正在提交…", async () => {
-    await commitChanges(repoPath.value, payload.message, payload.amend, payload.paths);
-    if (payload.push) {
-      await pushTo(repoPath.value, "", repo.value!.branch);
-    }
-    repo.value = await openRepo(repoPath.value);
-    await refreshAll();
-    showCommit.value = false;
-    return true;
-  });
+  const ok = await withBusy(
+    payload.push ? "正在提交并推送…" : "正在提交…",
+    async () => {
+      await commitChanges(repoPath.value, payload.message, payload.amend, payload.paths);
+      if (payload.push) {
+        await pushTo(repoPath.value, "", repo.value!.branch);
+      }
+      repo.value = await openRepo(repoPath.value);
+      await refreshAll();
+      showCommit.value = false;
+      return true;
+    },
+    { errorPopup: true, errorTitle: payload.push ? "提交并推送失败" : "提交失败" },
+  );
   if (ok) {
     notify(payload.push ? `已提交并推送到 ${repo.value?.branch || "远程"}` : "提交成功");
   }
 }
 
 async function handleCheckout(name: string) {
-  const ok = await withBusy(`正在切换到 ${name}…`, async () => {
-    await checkoutBranch(repoPath.value, name);
-    repo.value = await openRepo(repoPath.value);
-    selectedHash.value = "";
-    await refreshAll();
-    return true;
-  });
+  const ok = await withBusy(
+    `正在切换到 ${name}…`,
+    async () => {
+      await checkoutBranch(repoPath.value, name);
+      repo.value = await openRepo(repoPath.value);
+      selectedHash.value = "";
+      await refreshAll();
+      return true;
+    },
+    { errorPopup: true, errorTitle: "签出失败" },
+  );
   if (ok) notify(`已切换到 ${repo.value?.branch || name}`);
 }
 
@@ -420,17 +467,21 @@ async function confirmRenameBranch() {
 async function handlePush(payload?: { remote: string; branch: string }) {
   const remote = payload?.remote || "";
   const branch = payload?.branch || repo.value?.branch || "";
-  const ok = await withBusy("正在推送…", async () => {
-    if (payload) {
-      await pushTo(repoPath.value, payload.remote, payload.branch);
-    } else {
-      await pushTo(repoPath.value, "", repo.value!.branch);
-    }
-    repo.value = await openRepo(repoPath.value);
-    await refreshAll();
-    showPush.value = false;
-    return true;
-  });
+  const ok = await withBusy(
+    "正在推送…",
+    async () => {
+      if (payload) {
+        await pushTo(repoPath.value, payload.remote, payload.branch);
+      } else {
+        await pushTo(repoPath.value, "", repo.value!.branch);
+      }
+      repo.value = await openRepo(repoPath.value);
+      await refreshAll();
+      showPush.value = false;
+      return true;
+    },
+    { errorPopup: true, errorTitle: "推送失败" },
+  );
   if (ok) {
     notify(remote && branch ? `已推送到 ${remote}/${branch}` : "推送成功");
   }
@@ -449,9 +500,9 @@ async function handleMerge(theirs: string) {
       emitMeta();
     }
     return result;
-  });
+  }, { errorPopup: true, errorTitle: "合并失败" });
   if (outcome?.status === "conflicts") {
-    notify("合并存在冲突，请解决后继续", "error");
+    showConflicts.value = true;
   } else if (outcome) {
     notify(`已合并 ${theirs}`);
   }
@@ -475,11 +526,14 @@ async function handleAcceptConflict(payload: { path?: string; paths?: string[]; 
   });
 }
 
-async function handleSaveResolved(content: string) {
-  if (!resolvePath.value) return;
+async function handleSaveResolved(payload: { path: string; content: string } | string) {
+  const path = typeof payload === "string" ? resolvePath.value : payload.path;
+  const content = typeof payload === "string" ? payload : payload.content;
+  if (!path) return;
   await withBusy("正在保存冲突解决结果…", async () => {
-    conflictState.value = await writeResolved(repoPath.value, resolvePath.value, content);
+    conflictState.value = await writeResolved(repoPath.value, path, content);
     resolvePath.value = "";
+    mergeEditPath.value = "";
     await refreshAll();
   });
 }
@@ -490,26 +544,28 @@ async function handleContinueMerge() {
     showConflicts.value = false;
     conflictState.value = null;
     resolvePath.value = "";
+    mergeEditPath.value = "";
     repo.value = await openRepo(repoPath.value);
     selectedHash.value = "";
     await refreshAll();
     return true;
-  });
+  }, { errorPopup: true, errorTitle: "完成合并失败" });
   if (ok) notify("合并已完成");
 }
 
 async function handleAbortMerge() {
-  const ok = await withBusy("正在中止合并…", async () => {
+  const ok = await withBusy("正在取消合并…", async () => {
     await mergeAbort(repoPath.value);
     showConflicts.value = false;
     conflictState.value = null;
     resolvePath.value = "";
+    mergeEditPath.value = "";
     repo.value = await openRepo(repoPath.value);
     selectedHash.value = "";
     await refreshAll();
     return true;
   });
-  if (ok) notify("已中止合并");
+  if (ok) notify("已取消合并");
 }
 
 function openConflicts() {
@@ -611,6 +667,7 @@ onUnmounted(() => {
           :branches="branches"
           :dirty="changes.length + unversioned.length > 0"
           :busy="busy"
+          :log-loading="logLoading"
           @select="handleSelect"
           @refs-change="handleRefsChange"
           @changed="handleLogChanged"
@@ -627,6 +684,12 @@ onUnmounted(() => {
         :spawn-seq="termSpawnSeq"
         :visible="showTerminal && active"
         @close="showTerminal = false"
+      />
+      <ErrorDialog
+        v-if="actionError"
+        :title="actionErrorTitle"
+        :message="actionError"
+        @close="actionError = ''"
       />
       <StatusBar :text="statusText" :error="errorText" />
       <div v-if="busy" class="git-busy-overlay">
@@ -688,30 +751,30 @@ onUnmounted(() => {
         v-if="active && showMerge"
         :repo="repo"
         :branches="branches"
+        :recent="recentBranches"
         :busy="busy"
         @close="showMerge = false"
         @merge="handleMerge"
       />
       <ConflictsDialog
-        v-if="active && showConflicts && conflictState"
+        v-if="active && showConflicts && conflictState && !mergeEditPath"
         :state="conflictState"
         :busy="busy"
         @close="showConflicts = false"
+        @edit="mergeEditPath = $event"
         @accept="handleAcceptConflict"
-        @merge-file="resolvePath = $event"
         @continue="handleContinueMerge"
         @abort="handleAbortMerge"
       />
-      <ResolveConflictDialog
-        v-if="active && resolvePath && conflictState"
+      <MergeEditorPage
+        v-if="active && showConflicts && conflictState && mergeEditPath"
+        :state="conflictState"
         :repo-path="repoPath"
-        :path="resolvePath"
-        :ours-label="conflictState.ours"
-        :theirs-label="conflictState.theirs"
+        :path="mergeEditPath"
         :busy="busy"
-        @close="resolvePath = ''"
-        @accept="handleAcceptConflict({ path: resolvePath, side: $event })"
+        @back="mergeEditPath = ''"
         @save="handleSaveResolved"
+        @abort="handleAbortMerge"
       />
     </template>
     <div v-else class="empty-hint">正在打开仓库…</div>

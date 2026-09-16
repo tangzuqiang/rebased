@@ -31,6 +31,13 @@
   --text-warn: #c9a227;
   --bg-tabbar: #1e1f22;
   --bg-tab-active: #3a3d41;
+  --diff-ours-head: #243246;
+  --diff-base-head: #2d2f33;
+  --diff-theirs-head: #2a3a2c;
+  --diff-changed: #3d3420;
+  --diff-added-bg: #1f3d28;
+  --diff-deleted-bg: #3d2224;
+  --diff-conflict-bg: #4a2a4a;
   font-family: "Segoe UI", "Microsoft YaHei", Inter, system-ui, sans-serif;
   font-size: 12px;
   color: var(--text);
@@ -65,6 +72,13 @@ html[data-theme="light"] {
   --text-warn: #8a6d12;
   --bg-tabbar: #d5d9e0;
   --bg-tab-active: #ffffff;
+  --diff-ours-head: #d6e4ff;
+  --diff-base-head: #eceef1;
+  --diff-theirs-head: #d8eedc;
+  --diff-changed: #fff3c4;
+  --diff-added-bg: #d8f3e0;
+  --diff-deleted-bg: #ffd6d6;
+  --diff-conflict-bg: #f3d4f3;
   color-scheme: light;
 }
 
@@ -315,6 +329,14 @@ button:disabled.is-loading {
   height: min(860px, calc(100vh - 32px));
 }
 
+.modal-box.tall:not(.wide):not(.medium) {
+  min-height: 430px;
+}
+
+.modal-box.wide.tall {
+  height: min(1060px, calc(100vh - 32px));
+}
+
 .modal-box.medium {
   width: min(960px, calc(100vw - 48px));
   height: min(560px, calc(100vh - 48px));
@@ -354,7 +376,8 @@ button:disabled.is-loading {
 }
 
 .modal-box.wide .modal-body,
-.modal-box.medium .modal-body {
+.modal-box.medium .modal-body,
+.modal-box.tall .modal-body {
   overflow: hidden;
   display: flex;
   flex-direction: column;

@@ -12,8 +12,8 @@ const emit = defineEmits<{
   change: [refs: string[]];
 }>();
 
-const openLocal = ref(true);
-const openRemote = ref(true);
+const openLocal = ref(false);
+const openRemote = ref(false);
 const openTags = ref(false);
 const selected = ref<string[]>(["HEAD"]);
 const query = ref("");

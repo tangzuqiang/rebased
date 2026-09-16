@@ -138,12 +138,20 @@ export interface MergePreview {
   files: MergeFileInfo[];
 }
 
+export interface BlameLine {
+  author: string;
+  timestamp: number;
+}
+
 export interface MergeFileContent {
   path: string;
   ours: string;
   base: string;
   theirs: string;
   binary: boolean;
+  oursBlame?: BlameLine[];
+  baseBlame?: BlameLine[];
+  theirsBlame?: BlameLine[];
 }
 
 export interface ConflictFile {
@@ -165,6 +173,11 @@ export interface MergeOutcome {
   state: MergeState;
 }
 
+export interface MergeCompare {
+  canMerge: boolean;
+  message: string;
+}
+
 export type DiffKind = "same" | "changed" | "added" | "deleted" | "conflict" | "empty";
 
 export interface Diff3Row {
@@ -174,4 +187,7 @@ export interface Diff3Row {
   oursKind: DiffKind;
   baseKind: DiffKind;
   theirsKind: DiffKind;
+  oursBlame?: BlameLine;
+  baseBlame?: BlameLine;
+  theirsBlame?: BlameLine;
 }

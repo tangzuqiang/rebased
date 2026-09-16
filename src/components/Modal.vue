@@ -5,6 +5,7 @@ const props = defineProps<{
   title: string;
   wide?: boolean;
   medium?: boolean;
+  tall?: boolean;
   allowFullscreen?: boolean;
   noFooter?: boolean;
   flush?: boolean;
@@ -20,7 +21,7 @@ const fullscreen = ref(false);
 <template>
   <Teleport to="body">
     <div class="modal-mask" :class="{ fill: fullscreen }" @mousedown.self="emit('close')">
-      <div class="modal-box" :class="{ wide, medium, fullscreen, flush }">
+      <div class="modal-box" :class="{ wide, medium, tall, fullscreen, flush }">
         <header class="modal-head">
           <h2>{{ title }}</h2>
           <div class="head-actions">

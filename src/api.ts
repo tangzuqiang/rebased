@@ -8,6 +8,7 @@ import type {
   GeneratedMessage,
   GitCommit,
   GitFile,
+  MergeCompare,
   MergeFileContent,
   MergeOutcome,
   MergePreview,
@@ -115,6 +116,10 @@ export function getMergeFile(repo: string | undefined, theirs: string, path: str
 
 export function mergeBranch(repo: string | undefined, theirs: string) {
   return invoke<MergeOutcome>("merge_branch", withRepo(repo, { theirs }));
+}
+
+export function compareMerge(repo: string | undefined, theirs: string) {
+  return invoke<MergeCompare>("compare_merge", withRepo(repo, { theirs }));
 }
 
 export function mergeAbort(repo?: string) {

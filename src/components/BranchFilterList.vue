@@ -181,7 +181,9 @@ defineExpose({
         </template>
       </div>
 
-      <div class="group">
+      <div v-if="!searching" class="hint">输入分支名称进行搜索</div>
+
+      <div v-if="searching" class="group">
         <button type="button" class="group-row" @click="toggleGroup('local')">
           <Icons name="chevron" :size="10" :class="{ folded: !isOpen('local') }" />
           <span>本地</span>
@@ -205,7 +207,7 @@ defineExpose({
         </template>
       </div>
 
-      <div class="group">
+      <div v-if="searching" class="group">
         <button type="button" class="group-row" @click="toggleGroup('remote')">
           <Icons name="chevron" :size="10" :class="{ folded: !isOpen('remote') }" />
           <span>远程</span>
@@ -228,7 +230,7 @@ defineExpose({
         </template>
       </div>
 
-      <div class="group">
+      <div v-if="searching" class="group">
         <button type="button" class="group-row" @click="toggleGroup('tag')">
           <Icons name="chevron" :size="10" :class="{ folded: !isOpen('tag') }" />
           <span>标签</span>
@@ -360,10 +362,15 @@ defineExpose({
   font-size: 11px;
 }
 
-.empty {
+.empty,
+.hint {
   padding: 4px 10px 6px 22px;
   color: var(--text-dim);
   font-size: 12px;
+}
+
+.hint {
+  padding: 8px 10px 10px;
 }
 
 .folded {

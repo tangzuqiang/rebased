@@ -1,21 +1,32 @@
-import type { Diff3Row, DiffKind } from "./types";
+import type { BlameLine, Diff3Row, DiffKind } from "./types";
 
 type Op = { type: "eq" | "del" | "ins"; a?: string; b?: string };
 
-function lcsOps(a: string[], b: string[]): Op[] {
+export type AlignDiff3Options = {
+  blame?: { ours?: BlameLine[]; base?: BlameLine[]; theirs?: BlameLine[] };
+  ignoreWhitespace?: boolean;
+};
+
+function normalize(line: string, ignoreWhitespace: boolean) {
+  return ignoreWhitespace ? line.replace(/\s+/g, " ").trim() : line;
+}
+
+function lcsOps(a: string[], b: string[], ignoreWhitespace = false): Op[] {
+  const keyA = a.map((line) => normalize(line, ignoreWhitespace));
+  const keyB = b.map((line) => normalize(line, ignoreWhitespace));
   const n = a.length;
   const m = b.length;
   const dp: number[][] = Array.from({ length: n + 1 }, () => Array(m + 1).fill(0));
   for (let i = n - 1; i >= 0; i -= 1) {
     for (let j = m - 1; j >= 0; j -= 1) {
-      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      dp[i][j] = keyA[i] === keyB[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
     }
   }
   const ops: Op[] = [];
   let i = 0;
   let j = 0;
   while (i < n && j < m) {
-    if (a[i] === b[j]) {
+    if (keyA[i] === keyB[j]) {
       ops.push({ type: "eq", a: a[i], b: b[j] });
       i += 1;
       j += 1;
@@ -43,15 +54,31 @@ function splitLines(text: string) {
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
 }
 
-export function alignDiff3(oursText: string, baseText: string, theirsText: string): Diff3Row[] {
+function takeBlame(list: BlameLine[] | undefined, index: { value: number }, kind: DiffKind): BlameLine | undefined {
+  if (kind === "empty" || kind === "deleted") return undefined;
+  const item = list?.[index.value];
+  index.value += 1;
+  return item;
+}
+
+export function alignDiff3(
+  oursText: string,
+  baseText: string,
+  theirsText: string,
+  options: AlignDiff3Options = {},
+): Diff3Row[] {
+  const ignoreWhitespace = Boolean(options.ignoreWhitespace);
   const ours = splitLines(oursText);
   const base = splitLines(baseText);
   const theirs = splitLines(theirsText);
-  const left = lcsOps(base, ours);
-  const right = lcsOps(base, theirs);
+  const left = lcsOps(base, ours, ignoreWhitespace);
+  const right = lcsOps(base, theirs, ignoreWhitespace);
   const rows: Diff3Row[] = [];
   let li = 0;
   let ri = 0;
+  const oursIndex = { value: 0 };
+  const baseIndex = { value: 0 };
+  const theirsIndex = { value: 0 };
 
   const pushRow = (
     oursLine: string,
@@ -66,7 +93,7 @@ export function alignDiff3(oursText: string, baseText: string, theirsText: strin
       oursKind !== "empty" &&
       theirsKind !== "same" &&
       theirsKind !== "empty" &&
-      oursLine !== theirsLine;
+      normalize(oursLine, ignoreWhitespace) !== normalize(theirsLine, ignoreWhitespace);
     rows.push({
       ours: oursLine,
       base: baseLine,
@@ -74,6 +101,9 @@ export function alignDiff3(oursText: string, baseText: string, theirsText: strin
       oursKind: conflict ? "conflict" : oursKind,
       baseKind: conflict ? "conflict" : baseKind,
       theirsKind: conflict ? "conflict" : theirsKind,
+      oursBlame: takeBlame(options.blame?.ours, oursIndex, oursKind),
+      baseBlame: takeBlame(options.blame?.base, baseIndex, baseKind),
+      theirsBlame: takeBlame(options.blame?.theirs, theirsIndex, theirsKind),
     });
   };
 
@@ -115,8 +145,8 @@ export function alignDiff3(oursText: string, baseText: string, theirsText: strin
       continue;
     }
     if (l?.type === "eq" && r?.type === "eq") {
-      const changedOurs = l.a !== l.b;
-      const changedTheirs = r.a !== r.b;
+      const changedOurs = !ignoreWhitespace && l.a !== l.b;
+      const changedTheirs = !ignoreWhitespace && r.a !== r.b;
       pushRow(
         l.b ?? "",
         l.a ?? "",

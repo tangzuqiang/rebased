@@ -5,8 +5,8 @@ mod term;
 mod updater;
 
 use git::{
-    AppState, BranchInfo, FileDiff, FilePreview, GitCommit, GitFile, MergeFileContent, MergeOutcome,
-    MergePreview, MergeState, RepoInfo, StatusPayload,
+    AppState, BranchInfo, FileDiff, FilePreview, GitCommit, GitFile, MergeCompare, MergeFileContent,
+    MergeOutcome, MergePreview, MergeState, RepoInfo, StatusPayload,
 };
 use std::path::PathBuf;
 use store::{AppStore, RecentProject, SessionState};
@@ -170,6 +170,16 @@ async fn get_merge_file(
 ) -> Result<MergeFileContent, String> {
     let repo = repo_dir(&state, repo)?;
     run_blocking(move || git::merge_file(&repo, &theirs, &path)).await
+}
+
+#[tauri::command]
+async fn compare_merge(
+    state: State<'_, AppState>,
+    theirs: String,
+    repo: Option<String>,
+) -> Result<MergeCompare, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::compare_merge(&path, &theirs)).await
 }
 
 #[tauri::command]
@@ -602,6 +612,7 @@ pub fn run() {
             push_to,
             get_merge_preview,
             get_merge_file,
+            compare_merge,
             merge_branch,
             merge_abort,
             get_merge_state,

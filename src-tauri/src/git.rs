@@ -715,6 +715,13 @@ pub struct MergePreview {
     pub files: Vec<MergeFileInfo>,
 }
 
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BlameLine {
+    pub author: String,
+    pub timestamp: i64,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeFileContent {
@@ -723,6 +730,40 @@ pub struct MergeFileContent {
     pub base: String,
     pub theirs: String,
     pub binary: bool,
+    pub ours_blame: Vec<BlameLine>,
+    pub base_blame: Vec<BlameLine>,
+    pub theirs_blame: Vec<BlameLine>,
+}
+
+fn parse_blame(raw: &str) -> Vec<BlameLine> {
+    let mut lines = Vec::new();
+    let mut author = String::new();
+    let mut timestamp = 0i64;
+    for line in raw.lines() {
+        if let Some(value) = line.strip_prefix("author ") {
+            author = value.to_string();
+        } else if let Some(value) = line.strip_prefix("author-time ") {
+            timestamp = value.parse().unwrap_or(0);
+        } else if line.starts_with('\t') {
+            lines.push(BlameLine {
+                author: author.clone(),
+                timestamp,
+            });
+        }
+    }
+    lines
+}
+
+fn blame_lines(repo: &Path, rev: &str, path: &str) -> Vec<BlameLine> {
+    if rev.trim().is_empty() || path.trim().is_empty() {
+        return Vec::new();
+    }
+    let raw = run_git(
+        repo,
+        &["blame", "--line-porcelain", "-w", rev, "--", path],
+    )
+    .unwrap_or_default();
+    parse_blame(&raw)
 }
 
 pub fn merge_preview(repo: &Path, theirs: &str) -> Result<MergePreview, String> {
@@ -806,6 +847,21 @@ pub fn merge_file(repo: &Path, theirs: &str, path: &str) -> Result<MergeFileCont
         base: if binary { String::new() } else { base_text },
         theirs: if binary { String::new() } else { theirs_text },
         binary,
+        ours_blame: if binary {
+            Vec::new()
+        } else {
+            blame_lines(repo, "HEAD", path)
+        },
+        base_blame: if binary {
+            Vec::new()
+        } else {
+            blame_lines(repo, &base, path)
+        },
+        theirs_blame: if binary {
+            Vec::new()
+        } else {
+            blame_lines(repo, theirs, path)
+        },
     })
 }
 
@@ -819,12 +875,33 @@ pub fn conflict_file(repo: &Path, path: &str) -> Result<MergeFileContent, String
     let base_text = show_file(repo, ":1", path);
     let theirs_text = show_file(repo, ":3", path);
     let binary = is_binary(&ours) || is_binary(&base_text) || is_binary(&theirs_text);
+    let theirs_rev = run_git(repo, &["rev-parse", "MERGE_HEAD"])
+        .map(|item| item.trim().to_string())
+        .unwrap_or_else(|_| "MERGE_HEAD".to_string());
+    let base_rev = run_git(repo, &["merge-base", "HEAD", &theirs_rev])
+        .map(|item| item.trim().to_string())
+        .unwrap_or_default();
     Ok(MergeFileContent {
         path: path.to_string(),
         ours: if binary { String::new() } else { ours },
         base: if binary { String::new() } else { base_text },
         theirs: if binary { String::new() } else { theirs_text },
         binary,
+        ours_blame: if binary {
+            Vec::new()
+        } else {
+            blame_lines(repo, "HEAD", path)
+        },
+        base_blame: if binary || base_rev.is_empty() {
+            Vec::new()
+        } else {
+            blame_lines(repo, &base_rev, path)
+        },
+        theirs_blame: if binary {
+            Vec::new()
+        } else {
+            blame_lines(repo, &theirs_rev, path)
+        },
     })
 }
 
@@ -851,6 +928,55 @@ pub struct MergeOutcome {
     pub status: String,
     pub message: String,
     pub state: MergeState,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeCompare {
+    pub can_merge: bool,
+    pub message: String,
+}
+
+fn is_fatal_git(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("fatal") || lower.contains("bad revision") || lower.contains("unknown revision")
+}
+
+pub fn compare_merge(repo: &Path, theirs: &str) -> Result<MergeCompare, String> {
+    if theirs.trim().is_empty() {
+        return Ok(MergeCompare {
+            can_merge: false,
+            message: "请选择要合并的分支".to_string(),
+        });
+    }
+
+    let (already, _, ancestor_err) =
+        exec_git(repo, &["merge-base", "--is-ancestor", theirs, "HEAD"])?;
+    if is_fatal_git(&ancestor_err) {
+        return Err(localize_git_error(ancestor_err.trim()));
+    }
+    if already {
+        return Ok(MergeCompare {
+            can_merge: false,
+            message: "该分支已合并，或与当前分支相同".to_string(),
+        });
+    }
+
+    let (no_diff, _, diff_err) = exec_git(repo, &["diff", "--quiet", "HEAD", theirs])?;
+    if is_fatal_git(&diff_err) {
+        return Err(localize_git_error(diff_err.trim()));
+    }
+    if no_diff {
+        return Ok(MergeCompare {
+            can_merge: false,
+            message: "两个分支代码相同，无需合并".to_string(),
+        });
+    }
+
+    Ok(MergeCompare {
+        can_merge: true,
+        message: String::new(),
+    })
 }
 
 pub fn merge_branch(repo: &Path, theirs: &str) -> Result<MergeOutcome, String> {

@@ -10,8 +10,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: [];
+  edit: [path: string];
   accept: [payload: { paths: string[]; side: "ours" | "theirs" }];
-  mergeFile: [path: string];
   continue: [];
   abort: [];
 }>();
@@ -19,42 +19,60 @@ const emit = defineEmits<{
 const selected = ref<string[]>(props.state.files[0] ? [props.state.files[0].path] : []);
 const lastClicked = ref(props.state.files[0]?.path ?? "");
 const groupByDir = ref(false);
+const pendingResolved = ref<string[]>([]);
 
-const selectedFiles = computed(() =>
-  props.state.files.filter((file) => selected.value.includes(file.path)),
+const visibleFiles = computed(() =>
+  props.state.files.filter((file) => !pendingResolved.value.includes(file.path)),
 );
+const selectedFiles = computed(() =>
+  visibleFiles.value.filter((file) => selected.value.includes(file.path)),
+);
+const canMergeOne = computed(() => selected.value.length === 1 && Boolean(selected.value[0]));
 
-const rows = computed(() => {
+const tableRows = computed(() => {
   if (!groupByDir.value) {
-    return props.state.files.map((file) => ({ type: "file" as const, file }));
+    return visibleFiles.value.map((file) => ({ type: "file" as const, file }));
   }
   const groups = new Map<string, ConflictFile[]>();
-  for (const file of props.state.files) {
+  for (const file of visibleFiles.value) {
     const dir = file.path.includes("/") ? file.path.split("/").slice(0, -1).join("/") : "";
     const list = groups.get(dir) ?? [];
     list.push(file);
     groups.set(dir, list);
   }
-  const result: Array<{ type: "dir" | "file"; dir?: string; file?: ConflictFile; paths?: string[] }> = [];
+  const resultRows: Array<{ type: "dir" | "file"; dir?: string; file?: ConflictFile; paths?: string[] }> = [];
   for (const [dir, files] of groups) {
-    result.push({ type: "dir", dir: dir || "仓库根目录", paths: files.map((file) => file.path) });
+    resultRows.push({ type: "dir", dir: dir || "仓库根目录", paths: files.map((file) => file.path) });
     for (const file of files) {
-      result.push({ type: "file", file });
+      resultRows.push({ type: "file", file });
     }
   }
-  return result;
+  return resultRows;
 });
 
 watch(
   () => props.state.files.map((file) => file.path).join("\n"),
   () => {
     const alive = new Set(props.state.files.map((file) => file.path));
-    selected.value = selected.value.filter((path) => alive.has(path));
-    if (!selected.value.length && props.state.files[0]) {
-      selected.value = [props.state.files[0].path];
+    pendingResolved.value = pendingResolved.value.filter((path) => alive.has(path));
+    selected.value = selected.value.filter((path) =>
+      visibleFiles.value.some((file) => file.path === path),
+    );
+    if (!selected.value.length && visibleFiles.value[0]) {
+      selected.value = [visibleFiles.value[0].path];
     }
-    if (!alive.has(lastClicked.value)) {
+    if (!visibleFiles.value.some((file) => file.path === lastClicked.value)) {
       lastClicked.value = selected.value[0] ?? "";
+    }
+  },
+);
+
+watch(
+  () => props.busy,
+  (busy, wasBusy) => {
+    if (wasBusy && !busy) {
+      const alive = new Set(props.state.files.map((file) => file.path));
+      pendingResolved.value = pendingResolved.value.filter((path) => !alive.has(path));
     }
   },
 );
@@ -69,13 +87,13 @@ function dirName(path: string) {
 }
 
 function selectFile(path: string, event: MouseEvent) {
-  const paths = props.state.files.map((file) => file.path);
+  const paths = visibleFiles.value.map((file) => file.path);
   if (event.shiftKey && lastClicked.value) {
     const from = paths.indexOf(lastClicked.value);
     const to = paths.indexOf(path);
     if (from >= 0 && to >= 0) {
-      const [start, end] = from < to ? [from, to] : [to, from];
-      selected.value = paths.slice(start, end + 1);
+      selected.value = paths.slice(Math.min(from, to), Math.max(from, to) + 1);
+      lastClicked.value = path;
       return;
     }
   }
@@ -83,10 +101,17 @@ function selectFile(path: string, event: MouseEvent) {
     selected.value = selected.value.includes(path)
       ? selected.value.filter((item) => item !== path)
       : [...selected.value, path];
-  } else {
-    selected.value = [path];
+    lastClicked.value = path;
+    return;
   }
+  selected.value = [path];
   lastClicked.value = path;
+}
+
+function openMerge(path?: string) {
+  const target = path || (selected.value.length === 1 ? selected.value[0] : "");
+  if (!target) return;
+  emit("edit", target);
 }
 
 function selectDir(paths: string[] = []) {
@@ -94,46 +119,58 @@ function selectDir(paths: string[] = []) {
   lastClicked.value = paths[0] ?? "";
 }
 
-function accept(side: "ours" | "theirs") {
-  if (!selected.value.length) return;
-  emit("accept", { paths: [...selected.value], side });
+function hideResolved(paths: string[]) {
+  pendingResolved.value = [...new Set([...pendingResolved.value, ...paths])];
+  selected.value = selected.value.filter((item) => !paths.includes(item));
+  if (!selected.value.length && visibleFiles.value[0]) {
+    selected.value = [visibleFiles.value[0].path];
+  }
 }
 
-function mergeSelected() {
-  const path = selected.value[0];
-  if (path) emit("mergeFile", path);
+function accept(side: "ours" | "theirs", paths?: string[]) {
+  const list = paths?.length ? paths : [...selected.value];
+  if (!list.length) return;
+  hideResolved(list);
+  emit("accept", { paths: list, side });
+}
+
+function cancelMerge() {
+  if (props.busy) return;
+  if (!window.confirm("确定取消本次合并？工作区将恢复到合并前的状态。")) return;
+  emit("abort");
+}
+
+function finishMerge() {
+  if (visibleFiles.value.length) return;
+  emit("continue");
 }
 </script>
 
 <template>
-  <Modal title="冲突" medium @close="emit('close')">
+  <Modal title="冲突文件" medium @close="emit('close')">
     <div class="conflicts">
       <p class="subtitle">
         正在将分支 <strong>{{ state.theirs }}</strong> 合并到分支 <strong>{{ state.ours }}</strong>
+        。单击选中文件，双击或点「合并」进入合并页；也可直接使用您的 / 他们的覆盖该文件。
       </p>
-      <div class="table-wrap">
+      <div class="list">
         <div class="head">
-          <span>名称</span>
-          <span>本地（{{ state.ours }}）</span>
-          <span>传入（{{ state.theirs }}）</span>
+          <span>冲突文件</span>
+          <span>本地</span>
+          <span>传入</span>
+          <span>操作</span>
         </div>
         <div class="scroll body">
-          <template v-for="row in rows" :key="row.type === 'dir' ? row.dir : row.file?.path">
-            <button
-              v-if="row.type === 'dir'"
-              type="button"
-              class="dir"
-              @click="selectDir(row.paths)"
-            >
+          <template v-for="row in tableRows" :key="row.type === 'dir' ? row.dir : row.file?.path">
+            <button v-if="row.type === 'dir'" type="button" class="dir" @click="selectDir(row.paths)">
               {{ row.dir }}
             </button>
-            <button
+            <div
               v-else-if="row.file"
-              type="button"
               class="row"
               :class="{ selected: selected.includes(row.file.path) }"
               @click="selectFile(row.file.path, $event)"
-              @dblclick="emit('mergeFile', row.file.path)"
+              @dblclick="openMerge(row.file.path)"
             >
               <span class="name" :title="row.file.path">
                 {{ fileName(row.file.path) }}
@@ -141,30 +178,41 @@ function mergeSelected() {
               </span>
               <span>{{ row.file.oursStatus }}</span>
               <span>{{ row.file.theirsStatus }}</span>
-            </button>
+              <span class="actions" @click.stop @dblclick.stop>
+                <button type="button" class="mini" :disabled="busy" @click="accept('ours', [row.file.path])">
+                  使用您的
+                </button>
+                <button type="button" class="mini" :disabled="busy" @click="accept('theirs', [row.file.path])">
+                  使用他们的
+                </button>
+                <button type="button" class="mini primary" :disabled="busy" @click="openMerge(row.file.path)">
+                  合并
+                </button>
+              </span>
+            </div>
           </template>
-          <div v-if="!state.files.length" class="empty-hint">所有冲突已处理，可以继续合并</div>
+          <div v-if="!visibleFiles.length" class="empty-hint">所有冲突已处理，可以完成合并</div>
         </div>
+        <label class="group">
+          <input v-model="groupByDir" type="checkbox" />
+          按目录分组
+        </label>
       </div>
-      <label class="group">
-        <input v-model="groupByDir" type="checkbox" />
-        按目录分组
-      </label>
     </div>
     <template #footer>
-      <button type="button" class="secondary-btn" :disabled="busy" @click="emit('abort')">中止合并</button>
+      <button type="button" class="danger-btn" :disabled="busy" @click="cancelMerge">取消合并</button>
       <span class="spacer" />
       <button type="button" class="secondary-btn" :disabled="busy || !selectedFiles.length" @click="accept('ours')">
-        接受本地
+        使用您的
       </button>
       <button type="button" class="secondary-btn" :disabled="busy || !selectedFiles.length" @click="accept('theirs')">
-        接受传入
+        使用他们的
       </button>
-      <button type="button" class="primary-btn" :disabled="busy || selectedFiles.length !== 1" @click="mergeSelected">
-        合并…
+      <button type="button" class="secondary-btn" :disabled="busy || !canMergeOne" @click="openMerge()">
+        合并
       </button>
-      <button type="button" class="primary-btn" :disabled="busy || state.files.length > 0" @click="emit('continue')">
-        继续合并
+      <button type="button" class="primary-btn" :disabled="busy || visibleFiles.length > 0" @click="finishMerge">
+        完成合并
       </button>
     </template>
   </Modal>
@@ -172,32 +220,31 @@ function mergeSelected() {
 
 <style scoped>
 .conflicts {
-  flex: 1;
-  min-height: 0;
-  height: 100%;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-height: 360px;
+  height: 100%;
 }
 
 .subtitle {
   margin: 0;
 }
 
-.table-wrap {
+.list {
   flex: 1;
-  min-height: 260px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   border: 1px solid var(--border-soft);
   border-radius: 6px;
   overflow: hidden;
-  display: flex;
-  flex-direction: column;
 }
 
 .head,
 .row {
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) 160px 160px;
+  grid-template-columns: minmax(0, 1.4fr) 56px 56px 220px;
   align-items: center;
 }
 
@@ -225,8 +272,9 @@ function mergeSelected() {
 }
 
 .row {
-  min-height: 28px;
+  min-height: 32px;
   padding: 0 10px;
+  cursor: pointer;
 }
 
 .row:hover,
@@ -249,14 +297,54 @@ function mergeSelected() {
   white-space: nowrap;
 }
 
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.mini {
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: var(--bg-input);
+  font-size: 11px;
+}
+
+.mini.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.mini:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.mini.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
 .group {
   display: flex;
   align-items: center;
   gap: 6px;
+  padding: 6px 10px;
   color: var(--text-muted);
+  border-top: 1px solid var(--border);
 }
 
 .spacer {
   flex: 1;
+}
+
+.danger-btn {
+  height: 26px;
+  border-radius: 4px;
+  padding: 0 12px;
+  font-weight: 500;
+  background: var(--danger);
+  color: #fff;
 }
 </style>
