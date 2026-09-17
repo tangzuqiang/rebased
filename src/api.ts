@@ -302,6 +302,10 @@ export function copyWorktree(repo: string | undefined, src: string, dest: string
   return invoke<string>("copy_worktree", withRepo(repo, { src, dest }));
 }
 
+export function copyWorktreeToClipboard(repo: string | undefined, path: string) {
+  return invoke<void>("copy_worktree_to_clipboard", withRepo(repo, { path }));
+}
+
 export function renameWorktree(repo: string | undefined, src: string, dest: string) {
   return invoke<string>("rename_worktree", withRepo(repo, { src, dest }));
 }

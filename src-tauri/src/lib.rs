@@ -454,6 +454,16 @@ async fn copy_worktree(
 }
 
 #[tauri::command]
+async fn copy_worktree_to_clipboard(
+    state: State<'_, AppState>,
+    path: String,
+    repo: Option<String>,
+) -> Result<(), String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::copy_worktree_to_clipboard(&repo, &path)).await
+}
+
+#[tauri::command]
 async fn rename_worktree(
     state: State<'_, AppState>,
     src: String,
@@ -774,6 +784,7 @@ pub fn run() {
             preview_file,
             save_worktree_file,
             copy_worktree,
+            copy_worktree_to_clipboard,
             rename_worktree,
             delete_worktree,
             drop_commit,

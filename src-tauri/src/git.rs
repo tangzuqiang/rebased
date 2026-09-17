@@ -1716,6 +1716,133 @@ pub fn list_worktree(repo: &Path) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+fn set_clipboard_files(paths: &[String]) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        return windows_clipboard::set_files(paths);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = paths;
+        Err("当前系统不支持复制文件资源".to_string())
+    }
+}
+
+pub fn copy_worktree_to_clipboard(repo: &Path, rel: &str) -> Result<(), String> {
+    let (_, path) = resolve_worktree_file(repo, rel)?;
+    set_clipboard_files(&[os_display_path(&path)])
+}
+
+#[cfg(windows)]
+mod windows_clipboard {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+
+    const CF_HDROP: u32 = 15;
+    const GMEM_MOVEABLE: u32 = 0x0002;
+    const GMEM_ZEROINIT: u32 = 0x0040;
+    const DROPEFFECT_COPY: u32 = 1;
+
+    #[repr(C)]
+    struct DropFiles {
+        p_files: u32,
+        pt_x: i32,
+        pt_y: i32,
+        f_nc: i32,
+        f_wide: i32,
+    }
+
+    extern "system" {
+        fn OpenClipboard(hwnd: *mut core::ffi::c_void) -> i32;
+        fn CloseClipboard() -> i32;
+        fn EmptyClipboard() -> i32;
+        fn SetClipboardData(format: u32, mem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+        fn GlobalAlloc(flags: u32, bytes: usize) -> *mut core::ffi::c_void;
+        fn GlobalLock(mem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+        fn GlobalUnlock(mem: *mut core::ffi::c_void) -> i32;
+        fn RegisterClipboardFormatW(name: *const u16) -> u32;
+    }
+
+    fn wide(text: &str) -> Vec<u16> {
+        std::ffi::OsStr::new(text).encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    fn alloc_bytes(bytes: &[u8]) -> Result<*mut core::ffi::c_void, String> {
+        unsafe {
+            let handle = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes.len());
+            if handle.is_null() {
+                return Err("无法分配剪贴板内存".to_string());
+            }
+            let locked = GlobalLock(handle);
+            if locked.is_null() {
+                return Err("无法写入剪贴板内存".to_string());
+            }
+            ptr::copy_nonoverlapping(bytes.as_ptr(), locked as *mut u8, bytes.len());
+            GlobalUnlock(handle);
+            Ok(handle)
+        }
+    }
+
+    pub fn set_files(paths: &[String]) -> Result<(), String> {
+        if paths.is_empty() {
+            return Err("没有可复制的文件".to_string());
+        }
+        let mut list = Vec::<u16>::new();
+        for path in paths {
+            list.extend(wide(path));
+        }
+        list.push(0);
+        let header = DropFiles {
+            p_files: std::mem::size_of::<DropFiles>() as u32,
+            pt_x: 0,
+            pt_y: 0,
+            f_nc: 0,
+            f_wide: 1,
+        };
+        let mut blob = vec![0u8; std::mem::size_of::<DropFiles>() + list.len() * 2];
+        unsafe {
+            ptr::copy_nonoverlapping(
+                &header as *const DropFiles as *const u8,
+                blob.as_mut_ptr(),
+                std::mem::size_of::<DropFiles>(),
+            );
+            ptr::copy_nonoverlapping(
+                list.as_ptr() as *const u8,
+                blob.as_mut_ptr().add(std::mem::size_of::<DropFiles>()),
+                list.len() * 2,
+            );
+        }
+        let drop_handle = alloc_bytes(&blob)?;
+        let effect = DROPEFFECT_COPY.to_le_bytes();
+        let effect_handle = alloc_bytes(&effect)?;
+        let format_name = wide("Preferred DropEffect");
+        unsafe {
+            let mut opened = false;
+            for _ in 0..20 {
+                if OpenClipboard(ptr::null_mut()) != 0 {
+                    opened = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            if !opened {
+                return Err("无法打开剪贴板".to_string());
+            }
+            EmptyClipboard();
+            if SetClipboardData(CF_HDROP, drop_handle).is_null() {
+                CloseClipboard();
+                return Err("写入文件到剪贴板失败".to_string());
+            }
+            let effect_format = RegisterClipboardFormatW(format_name.as_ptr());
+            if effect_format != 0 {
+                let _ = SetClipboardData(effect_format, effect_handle);
+            }
+            CloseClipboard();
+        }
+        Ok(())
+    }
+}
+
 fn os_display_path(path: &Path) -> String {
     let raw = path.to_string_lossy();
     raw.strip_prefix(r"\\?\")

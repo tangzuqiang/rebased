@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import "highlight.js/styles/atom-one-dark.css";
-import { absWorktreePath, copyWorktree, deleteWorktree, listWorktree, openInOs, previewFile, renameWorktree, revealInOs, saveWorktreeFile } from "../api";
+import { absWorktreePath, copyWorktreeToClipboard, deleteWorktree, listWorktree, openInOs, previewFile, renameWorktree, revealInOs, saveWorktreeFile } from "../api";
 import { commentPrefix, findInTextarea, handleIdeEditorKey, writeTextarea } from "../editorKeys";
 import { languageFromPath } from "../highlight";
 import { notify } from "../notify";
@@ -58,7 +58,7 @@ const editorEl = ref<HTMLTextAreaElement | null>(null);
 const findOpen = ref(false);
 const findQuery = ref("");
 const findHint = ref("");
-const fileDialog = ref<"" | "copy" | "rename">("");
+const fileDialog = ref(false);
 const fileDialogName = ref("");
 const fileDialogNode = ref<TreeNode | null>(null);
 const fileBusy = ref(false);
@@ -239,29 +239,35 @@ function joinRel(dir: string, name: string) {
   return dir ? `${dir}/${clean}` : clean;
 }
 
-function suggestedCopyName(name: string) {
-  const index = name.lastIndexOf(".");
-  if (index > 0) return `${name.slice(0, index)} - 副本${name.slice(index)}`;
-  return `${name} - 副本`;
-}
-
 function underPath(child: string, parent: string) {
   return child === parent || child.startsWith(`${parent}/`);
 }
 
-function openFileDialog(kind: "copy" | "rename") {
+function openRenameDialog() {
   const node = menu.value.node;
   closeMenu();
   if (!node) return;
   fileDialogNode.value = node;
-  fileDialogName.value = kind === "copy" ? suggestedCopyName(node.name) : node.name;
-  fileDialog.value = kind;
+  fileDialogName.value = node.name;
+  fileDialog.value = true;
 }
 
 function closeFileDialog() {
   if (fileBusy.value) return;
-  fileDialog.value = "";
+  fileDialog.value = false;
   fileDialogNode.value = null;
+}
+
+async function copyFileResource() {
+  const node = menu.value.node;
+  closeMenu();
+  if (!node) return;
+  try {
+    await copyWorktreeToClipboard(props.repoPath, node.path);
+    notify("已复制文件，可在资源管理器或其他窗口粘贴");
+  } catch (error) {
+    notify(error instanceof Error ? error.message : String(error), "error");
+  }
 }
 
 async function confirmFileDialog() {
@@ -277,25 +283,22 @@ async function confirmFileDialog() {
     closeFileDialog();
     return;
   }
-  const copying = fileDialog.value === "copy";
   fileBusy.value = true;
   try {
-    const next = copying
-      ? await copyWorktree(props.repoPath, node.path, dest)
-      : await renameWorktree(props.repoPath, node.path, dest);
+    const next = await renameWorktree(props.repoPath, node.path, dest);
     const dir = parentDir(next);
     if (dir) {
       const keep = new Set(expanded.value);
       keep.add(dir);
       expanded.value = keep;
     }
-    if (!copying && (selected.value === node.path || underPath(selected.value, node.path))) {
+    if (selected.value === node.path || underPath(selected.value, node.path)) {
       selected.value = "";
       preview.value = null;
       draft.value = "";
       savedContent.value = "";
       if (!node.dir) {
-        fileDialog.value = "";
+        fileDialog.value = false;
         fileDialogNode.value = null;
         await loadTree(true);
         emit("changed");
@@ -304,11 +307,11 @@ async function confirmFileDialog() {
         return;
       }
     }
-    fileDialog.value = "";
+    fileDialog.value = false;
     fileDialogNode.value = null;
     await loadTree(true);
     emit("changed");
-    notify(copying ? `已复制为 ${next}` : `已重命名为 ${next}`);
+    notify(`已重命名为 ${next}`);
   } catch (error) {
     notify(error instanceof Error ? error.message : String(error), "error");
   } finally {
@@ -574,9 +577,9 @@ watch(
           <button v-if="menu.node && !menu.node.dir" type="button" @click="closeMenu(); openFile(menu.node.path)">
             在预览中打开
           </button>
+          <button type="button" @click="copyFileResource">复制</button>
           <button type="button" @click="copyPath">复制路径</button>
-          <button type="button" @click="openFileDialog('copy')">复制…</button>
-          <button type="button" @click="openFileDialog('rename')">重命名…</button>
+          <button type="button" @click="openRenameDialog">重命名…</button>
           <button type="button" @click="deleteCurrent">删除</button>
           <div class="divider" />
           <div class="sub-wrap" @mouseenter="menu.sub = true">
@@ -597,17 +600,13 @@ watch(
         </div>
       </div>
 
-      <Modal
-        v-if="fileDialog"
-        :title="fileDialog === 'copy' ? '复制' : '重命名'"
-        @close="closeFileDialog"
-      >
-        <p>将 <strong>{{ fileDialogNode?.path }}</strong> {{ fileDialog === "copy" ? "复制为" : "重命名为" }}：</p>
+      <Modal v-if="fileDialog" title="重命名" @close="closeFileDialog">
+        <p>将 <strong>{{ fileDialogNode?.path }}</strong> 重命名为：</p>
         <label>新名称 <input v-model="fileDialogName" @keydown.enter.prevent="confirmFileDialog" /></label>
         <template #footer>
           <button type="button" class="secondary-btn" :disabled="fileBusy" @click="closeFileDialog">取消</button>
           <button type="button" class="primary-btn" :disabled="fileBusy || !fileDialogName.trim()" @click="confirmFileDialog">
-            {{ fileDialog === "copy" ? "复制" : "重命名" }}
+            重命名
           </button>
         </template>
       </Modal>
