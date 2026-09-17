@@ -148,9 +148,9 @@ async function test() {
         </label>
         <label>
           <span>模型名称</span>
-          <input v-model="config.model" placeholder="例如 qwen-plus、gpt-4o-mini" />
+          <input v-model="config.model" placeholder="例如 qwen3:1.7b、gemma-4-31B-it" />
         </label>
-        <p class="muted">接口地址填到 /v1 即可。API Key 填密钥，不要填网址；服务不需要密钥则留空。</p>
+        <p class="muted">Ollama 地址填 http://127.0.0.1:11434 或 …/v1 都可以。模型名必须和 `ollama list` 完全一致，不能简写（qw3 会 404）。本地模型 API Key 通常留空。</p>
         <p v-if="hint" class="hint" :class="hintKind">{{ hint }}</p>
       </section>
       <section v-else-if="section === 'update'" class="panel">

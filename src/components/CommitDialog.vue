@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import { generateCommitMessage, getWorkingDiff } from "../api";
 import { parsePatch } from "../patch";
 import type { DiffLine, GitFile, RepoInfo } from "../types";
@@ -32,7 +32,11 @@ const diffError = ref("");
 const generating = ref(false);
 const generateHint = ref("");
 const submitting = ref<"" | "commit" | "commit-push">("");
+const messageBox = ref<HTMLTextAreaElement | null>(null);
 const locked = computed(() => props.busy || Boolean(submitting.value));
+let typeTimer: ReturnType<typeof setTimeout> | undefined;
+let typeToken = 0;
+let typedFull = "";
 
 const allFiles = computed(() => [
   ...props.changes.map((file) => ({ ...file, untracked: false })),
@@ -118,7 +122,13 @@ async function generateAi() {
     return;
   }
   generating.value = true;
+  let waited = 0;
   generateHint.value = "正在生成提交信息…";
+  const waitTimer = window.setInterval(() => {
+    waited += 1;
+    generateHint.value = `正在生成提交信息… 已等待 ${waited} 秒（本地大模型可能需要 1–4 分钟）`;
+  }, 1000);
+  stopTyping();
   await nextTick();
   try {
     const known = new Map(allFiles.value.map((file) => [file.path, file.untracked]));
@@ -129,20 +139,84 @@ async function generateAi() {
         untracked: known.get(path) ?? false,
       })),
     );
-    message.value = result.message;
     generateHint.value =
       result.source === "ai"
         ? `已由 ${result.model || "AI"} 根据 ${included.value.length} 个文件的差异生成，可继续修改`
         : result.message;
+    generating.value = false;
+    await typeMessage(result.message);
   } catch (error) {
     generateHint.value = error instanceof Error ? error.message : String(error);
   } finally {
+    window.clearInterval(waitTimer);
     generating.value = false;
   }
 }
 
+function stopTyping() {
+  typeToken += 1;
+  if (typeTimer !== undefined) {
+    clearTimeout(typeTimer);
+    typeTimer = undefined;
+  }
+}
+
+function onMessageInput() {
+  typedFull = "";
+  stopTyping();
+}
+
+async function typeMessage(full: string) {
+  stopTyping();
+  const token = typeToken;
+  typedFull = full;
+  const chars = [...full];
+  message.value = "";
+  await nextTick();
+  messageBox.value?.focus();
+  if (!chars.length) {
+    typedFull = "";
+    return;
+  }
+  const step = chars.length > 120 ? 2 : 1;
+  const delay = chars.length > 80 ? 12 : 18;
+  await new Promise<void>((resolve) => {
+    let index = 0;
+    const tick = () => {
+      if (token !== typeToken) {
+        resolve();
+        return;
+      }
+      index = Math.min(chars.length, index + step);
+      message.value = chars.slice(0, index).join("");
+      const el = messageBox.value;
+      if (el) {
+        const caret = el.value.length;
+        el.setSelectionRange(caret, caret);
+      }
+      if (index >= chars.length) {
+        typeTimer = undefined;
+        typedFull = "";
+        resolve();
+        return;
+      }
+      typeTimer = setTimeout(tick, delay);
+    };
+    tick();
+  });
+}
+
+function finishTyping() {
+  if (typedFull) {
+    message.value = typedFull;
+    typedFull = "";
+  }
+  stopTyping();
+}
+
 function submit(push: boolean) {
   if (locked.value) return;
+  finishTyping();
   submitting.value = push ? "commit-push" : "commit";
   emit("commit", {
     message: message.value,
@@ -161,6 +235,10 @@ watch(
 
 watch([activePath, activeUntracked], () => {
   void loadDiff();
+});
+
+onUnmounted(() => {
+  stopTyping();
 });
 </script>
 
@@ -261,8 +339,10 @@ watch([activePath, activeUntracked], () => {
             </div>
             <p v-if="generateHint" class="hint">{{ generateHint }}</p>
             <textarea
+              ref="messageBox"
               v-model="message"
               :placeholder="amend ? '留空则沿用上次提交说明' : '提交消息'"
+              @input="onMessageInput"
             />
             <div class="actions">
               <button

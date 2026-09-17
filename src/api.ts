@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   AiConfig,
+  BlameLine,
   BranchInfo,
   FileDiff,
   FilePreview,
@@ -292,6 +293,10 @@ export function openInOs(repo: string | undefined, path: string) {
 
 export function previewFile(repo: string | undefined, path: string) {
   return invoke<FilePreview>("preview_file", withRepo(repo, { path }));
+}
+
+export function getFileBlame(repo: string | undefined, path: string) {
+  return invoke<BlameLine[]>("get_file_blame", withRepo(repo, { path }));
 }
 
 export function saveWorktreeFile(repo: string | undefined, path: string, content: string) {

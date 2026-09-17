@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import "highlight.js/styles/atom-one-dark.css";
-import { absWorktreePath, copyWorktreeToClipboard, deleteWorktree, listWorktree, openInOs, previewFile, renameWorktree, revealInOs, saveWorktreeFile } from "../api";
+import { absWorktreePath, copyWorktreeToClipboard, deleteWorktree, getFileBlame, listWorktree, openInOs, previewFile, renameWorktree, revealInOs, saveWorktreeFile } from "../api";
 import { commentPrefix, findInTextarea, handleIdeEditorKey, writeTextarea } from "../editorKeys";
-import { languageFromPath } from "../highlight";
+import { escapeHtml, highlightCode, languageFromPath } from "../highlight";
 import { notify } from "../notify";
-import type { FilePreview } from "../types";
+import type { BlameLine, FilePreview } from "../types";
 import Icons from "./Icons.vue";
 import Modal from "./Modal.vue";
 
@@ -55,6 +55,8 @@ const menu = ref<{
 });
 const pathWindow = ref("");
 const editorEl = ref<HTMLTextAreaElement | null>(null);
+const highlightEl = ref<HTMLElement | null>(null);
+const gutterEl = ref<HTMLElement | null>(null);
 const findOpen = ref(false);
 const findQuery = ref("");
 const findHint = ref("");
@@ -62,11 +64,56 @@ const fileDialog = ref(false);
 const fileDialogName = ref("");
 const fileDialogNode = ref<TreeNode | null>(null);
 const fileBusy = ref(false);
+const showBlame = ref(true);
+const blameLines = ref<BlameLine[]>([]);
 
 const visible = computed(() => flatten(tree.value, query.value.trim().toLowerCase(), expanded.value));
-const lineCount = computed(() => (draft.value ? draft.value.split("\n").length : 0));
+const lineCount = computed(() => (draft.value ? draft.value.split("\n").length : 1));
+const lineNos = computed(() => Array.from({ length: lineCount.value }, (_, index) => index + 1));
+const gutterWide = computed(() => `${Math.max(String(lineCount.value).length, 2)}ch`);
+const blameAnnos = computed(() => lineNos.value.map((n) => blameDateAuthor(blameLines.value[n - 1])));
 const editable = computed(() => Boolean(preview.value && !preview.value.binary && !preview.value.truncated));
 const dirty = computed(() => editable.value && draft.value !== savedContent.value);
+const highlightedHtml = computed(() => renderHighlight(draft.value, selected.value || preview.value?.path || ""));
+
+function blameDateAuthor(meta?: BlameLine) {
+  if (!meta?.author) return "";
+  const date = meta.timestamp
+    ? new Date(meta.timestamp * 1000).toLocaleDateString("zh-CN")
+    : "";
+  return date ? `${date} ${meta.author}` : meta.author;
+}
+
+function formatBlame(meta?: BlameLine) {
+  if (!meta?.author) return "";
+  const time = meta.timestamp
+    ? new Date(meta.timestamp * 1000).toLocaleString("zh-CN", { hour12: false })
+    : "";
+  return time ? `${meta.author} · ${time}` : meta.author;
+}
+
+async function loadBlame(path: string) {
+  blameLines.value = await getFileBlame(props.repoPath, path).catch(() => []);
+}
+
+function renderHighlight(text: string, path: string) {
+  if (!text) return "\n";
+  const lang = languageFromPath(path);
+  const html = lang ? highlightCode(text, path) : escapeHtml(text);
+  return text.endsWith("\n") ? `${html}\n` : html;
+}
+
+function syncEditorView() {
+  const editor = editorEl.value;
+  if (!editor) return;
+  if (highlightEl.value) {
+    highlightEl.value.scrollTop = editor.scrollTop;
+    highlightEl.value.scrollLeft = editor.scrollLeft;
+  }
+  if (gutterEl.value) {
+    gutterEl.value.scrollTop = editor.scrollTop;
+  }
+}
 
 function buildTree(paths: string[]) {
   const root: TreeNode[] = [];
@@ -152,7 +199,10 @@ function applyPreview(result: FilePreview) {
   preview.value = result;
   draft.value = result.binary ? "" : result.content;
   savedContent.value = draft.value;
-  void nextTick(() => writeTextarea(editorEl.value, draft.value));
+  void nextTick(() => {
+    writeTextarea(editorEl.value, draft.value);
+    syncEditorView();
+  });
 }
 
 function onDraftInput(event: Event) {
@@ -173,14 +223,17 @@ async function openFile(path: string) {
   preview.value = null;
   draft.value = "";
   savedContent.value = "";
+  blameLines.value = [];
   try {
     applyPreview(await previewFile(props.repoPath, path));
+    void loadBlame(path);
   } catch (error) {
     previewError.value = error instanceof Error ? error.message : String(error);
   } finally {
     loadingPreview.value = false;
     await nextTick();
     writeTextarea(editorEl.value, draft.value);
+    syncEditorView();
   }
 }
 
@@ -190,6 +243,7 @@ async function saveFile() {
   previewError.value = "";
   try {
     applyPreview(await saveWorktreeFile(props.repoPath, selected.value, draft.value));
+    void loadBlame(selected.value);
     notify(`已保存 ${selected.value}`);
     emit("changed");
   } catch (error) {
@@ -405,6 +459,7 @@ function runFind(reverse = false) {
   const el = editorEl.value;
   if (!el || !findQuery.value) return;
   findHint.value = findInTextarea(el, findQuery.value, reverse) ? "" : "未找到";
+  syncEditorView();
 }
 
 function onEditorKey(event: KeyboardEvent) {
@@ -458,7 +513,14 @@ onUnmounted(() => {
 });
 
 watch(editorEl, (el) => {
-  if (el) writeTextarea(el, draft.value);
+  if (el) {
+    writeTextarea(el, draft.value);
+    syncEditorView();
+  }
+});
+
+watch(highlightedHtml, () => {
+  void nextTick(syncEditorView);
 });
 
 watch(
@@ -468,6 +530,7 @@ watch(
     preview.value = null;
     draft.value = "";
     savedContent.value = "";
+    blameLines.value = [];
     void loadTree();
   },
 );
@@ -517,6 +580,10 @@ watch(
             {{ selected || "选择一个文件查看内容" }}
             <em v-if="dirty">*</em>
           </span>
+          <label v-if="preview" class="blame-toggle">
+            <input v-model="showBlame" type="checkbox" />
+            Git 追溯
+          </label>
           <span v-if="preview" class="muted">
             {{ languageFromPath(preview.path) || "文本" }}
             · {{ formatSize(preview.size) }}
@@ -557,15 +624,37 @@ watch(
                 <Icons name="close" :size="12" />
               </button>
             </div>
-            <textarea
-              ref="editorEl"
-              class="editor"
-              spellcheck="false"
-              :readonly="!editable"
-              :placeholder="editable ? '在此编辑文件内容，Ctrl+S 保存' : ''"
-              @input="onDraftInput"
-              @keydown="onEditorKey"
-            />
+            <div class="code-view">
+              <div
+                ref="gutterEl"
+                class="gutter"
+                :class="{ blame: showBlame }"
+                :style="{ width: showBlame ? `calc(${gutterWide} + 128px)` : `calc(${gutterWide} + 18px)` }"
+              >
+                <div v-for="n in lineNos" :key="n" class="gutter-line" :title="formatBlame(blameLines[n - 1])">
+                  <span class="no">{{ n }}</span>
+                  <span v-if="showBlame" class="blame">{{ blameAnnos[n - 1] }}</span>
+                </div>
+              </div>
+              <div class="code-main">
+                <pre
+                  ref="highlightEl"
+                  class="code-hl hljs"
+                  aria-hidden="true"
+                  v-html="highlightedHtml"
+                />
+                <textarea
+                  ref="editorEl"
+                  class="editor"
+                  spellcheck="false"
+                  :readonly="!editable"
+                  :placeholder="editable ? '在此编辑文件内容，Ctrl+S 保存' : ''"
+                  @input="onDraftInput"
+                  @keydown="onEditorKey"
+                  @scroll="syncEditorView"
+                />
+              </div>
+            </div>
           </template>
         </div>
       </article>
@@ -805,18 +894,69 @@ header {
   background: var(--bg-warn);
 }
 
-.editor {
-  display: block;
-  width: 100%;
-  height: 100%;
+.code-view {
+  flex: 1;
   min-height: 0;
+  display: flex;
+  background: var(--bg-editor);
+}
+
+.blame-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.gutter {
+  flex: none;
+  overflow: hidden;
+  padding: 12px 6px 20px 8px;
+  color: var(--text-dim);
+  background: var(--bg-deep);
+  border-right: 1px solid var(--border);
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 18px;
+  user-select: none;
+}
+
+.gutter-line {
+  display: flex;
+  align-items: center;
+  height: 18px;
+  gap: 8px;
+}
+
+.gutter .no {
+  flex: none;
+  min-width: 2ch;
+  text-align: right;
+}
+
+.gutter .blame {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.code-main {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.code-hl,
+.editor {
+  position: absolute;
+  inset: 0;
   margin: 0;
   padding: 12px 16px 20px;
   border: 0;
-  outline: none;
-  resize: none;
-  color: var(--text-editor);
-  background: transparent;
   font-family: Consolas, "Courier New", monospace;
   font-size: 12px;
   line-height: 18px;
@@ -824,8 +964,35 @@ header {
   tab-size: 4;
 }
 
+.code-hl {
+  overflow: hidden;
+  pointer-events: none;
+  color: var(--text-editor);
+  background: transparent;
+}
+
+.code-hl :deep(.hljs) {
+  padding: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.editor {
+  z-index: 1;
+  outline: none;
+  resize: none;
+  overflow: auto;
+  color: transparent;
+  caret-color: var(--text-editor);
+  background: transparent;
+}
+
+.editor::selection {
+  background: rgba(53, 116, 240, 0.38);
+}
+
 .editor[readonly] {
-  color: var(--text-editor-muted);
+  caret-color: var(--text-editor-muted);
 }
 
 .ctx-mask {

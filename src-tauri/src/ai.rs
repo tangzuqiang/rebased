@@ -41,17 +41,38 @@ pub fn generate_commit_message(
         return Err("请先勾选要提交的文件".to_string());
     }
     let cfg = require_config(store)?;
-    let (names, prompt) = collect_diff_context(&repo, paths);
+    let (names, prompt) = collect_diff_context(&repo, paths)?;
     if prompt.trim().is_empty() {
         return Err("勾选的文件没有可读的文本变更，无法生成提交信息".to_string());
     }
 
-    let message = call_chat_api(
+    let mut message = call_chat_api(
         store,
         &cfg,
-        "你是 Git 提交信息助手。根据用户提供的变更文件和 diff 写中文提交说明：第一行不超过 50 字，用 feat/fix/docs/refactor/chore/test 之一开头；必要时空一行后用短句列出要点。只输出提交信息，不要解释，不要用 markdown。",
-        &format!("请根据以下 {} 个文件的实际差异生成提交信息。\n\n变更文件：\n{}\n\n差异：\n{}", names.len(), names.join("\n"), prompt),
+        COMMIT_SYSTEM_PROMPT,
+        &format!(
+            "请根据以下 {} 个文件的实际差异生成详细提交信息。\n\n变更文件：\n{}\n\n差异：\n{}\n\n最后要求：必须用简体中文；第一行是类型前缀加中文标题；空一行后写详细正文，按文件或改动点分条说明改了什么、为什么改。不要只写一行。禁止英文句子。",
+            names.len(),
+            names.join("\n"),
+            prompt
+        ),
+        ChatOptions {
+            think: true,
+            max_tokens: 2048,
+        },
     )?;
+    if looks_mostly_english(&message) {
+        message = call_chat_api(
+            store,
+            &cfg,
+            "你只负责把 Git 提交信息译成简体中文。保留 feat/fix/docs/refactor/chore/test 前缀和原有段落、列表结构，不要压缩成一行。只输出译文，不要解释。",
+            &format!("请译成简体中文，保持详细程度：\n{message}"),
+            ChatOptions {
+                think: false,
+                max_tokens: 1200,
+            },
+        )?;
+    }
     Ok(GeneratedMessage {
         message,
         source: "ai".to_string(),
@@ -66,6 +87,10 @@ pub fn test_ai_config(store: &AppStore) -> Result<String, String> {
         &cfg,
         "你只用于连通性测试。",
         "只回复一个词：ok",
+        ChatOptions {
+            think: false,
+            max_tokens: 16,
+        },
     )?;
     Ok(format!(
         "已连通，模型 {}，接口返回：{}",
@@ -137,11 +162,31 @@ fn merge_ai(cfg: &mut AiConfig, file: AiConfig) {
     }
 }
 
-fn collect_diff_context(repo: &std::path::Path, paths: &[DiffPath]) -> (Vec<String>, String) {
+/// 接近 PhpStorm / AI Commits：勾选文件送完整 diff，不静默截断。
+/// 超限直接失败，提示减少勾选，避免本地小模型被超大 prompt 拖死。
+const MAX_DIFF_BYTES: usize = 120_000;
+const REQUEST_TIMEOUT_SECS: u64 = 240;
+const COMMIT_SYSTEM_PROMPT: &str = "\
+你是 Git 提交信息助手。必须用简体中文写出详细提交说明，禁止整段英文。\
+第一行不超过 50 个汉字，格式为「类型: 中文摘要」，类型只能是 feat、fix、docs、refactor、chore、test 之一。\
+空一行后写正文：用 3 到 8 条中文短句说明每个关键改动、影响范围和原因，不要只输出一行标题。\
+只输出提交信息，不要解释，不要用 markdown 代码块。\
+示例：\
+feat: 为 Ollama 请求关闭思考并保持模型常驻\n\n\
+- 增加 keep_alive=-1，避免每次重新加载模型\n\
+- 生成提交信息时允许短思考，并提高输出长度以免正文被截断\n\
+- 若结果仍是英文，再翻译成中文并保留条目结构";
+
+struct ChatOptions {
+    think: bool,
+    max_tokens: u32,
+}
+
+fn collect_diff_context(repo: &std::path::Path, paths: &[DiffPath]) -> Result<(Vec<String>, String), String> {
     let mut names = Vec::new();
     let mut snippets = Vec::new();
     let mut total = 0usize;
-    for item in paths.iter().take(40) {
+    for item in paths {
         names.push(item.path.clone());
         let diff = git::working_diff(repo, &item.path, item.untracked).unwrap_or_else(|_| git::FileDiff {
             path: item.path.clone(),
@@ -153,37 +198,69 @@ fn collect_diff_context(repo: &std::path::Path, paths: &[DiffPath]) -> (Vec<Stri
         } else if diff.patch.trim().is_empty() {
             format!("文件：{}\n（没有文本 diff，请根据文件名理解变更）", item.path)
         } else {
-            let mut patch = diff.patch;
-            if truncate_utf8(&mut patch, 4000) {
-                patch.push_str("\n…");
-            }
-            format!("文件：{}\n{}", item.path, patch)
+            format!("文件：{}\n{}", item.path, diff.patch)
         };
         total += body.len();
-        snippets.push(body);
-        if total > 24000 {
-            snippets.push("（后续文件已省略，避免超出模型上下文）".to_string());
-            break;
+        if total > MAX_DIFF_BYTES {
+            return Err(diff_too_large_message(names.len(), paths.len(), total));
         }
+        snippets.push(body);
     }
-    (names, snippets.join("\n\n"))
+    Ok((names, snippets.join("\n\n")))
 }
 
-fn call_chat_api(store: &AppStore, cfg: &AiConfig, system: &str, user: &str) -> Result<String, String> {
+fn diff_too_large_message(reached: usize, selected: usize, bytes: usize) -> String {
+    format!(
+        "勾选了 {selected} 个文件，差异约 {} KB，超出模型可处理范围（已读到第 {reached} 个文件）。请减少勾选后再生成。二进制文件不会发送内容。",
+        bytes / 1024
+    )
+}
+
+fn is_context_overflow(status: u16, detail: &str) -> bool {
+    if status == 413 {
+        return true;
+    }
+    let lower = detail.to_ascii_lowercase();
+    lower.contains("too long")
+        || lower.contains("context length")
+        || lower.contains("context window")
+        || lower.contains("maximum context")
+        || lower.contains("too many tokens")
+        || lower.contains("prompt is too long")
+        || lower.contains("content too large")
+        || lower.contains("exceeds") && lower.contains("context")
+}
+
+fn call_chat_api(
+    store: &AppStore,
+    cfg: &AiConfig,
+    system: &str,
+    user: &str,
+    opts: ChatOptions,
+) -> Result<String, String> {
     let _ = store;
     let url = chat_completions_url(&cfg.base_url);
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": cfg.model,
-        "temperature": 0.2,
+        "keep_alive": -1,
+        "think": opts.think,
+        "temperature": 0.3,
+        "max_tokens": opts.max_tokens,
+        "stream": false,
         "messages": [
             { "role": "system", "content": system },
             { "role": "user", "content": user }
         ]
     });
+    body["reasoning_effort"] = if opts.think {
+        serde_json::json!("low")
+    } else {
+        serde_json::json!("none")
+    };
 
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(90)))
+        .timeout_global(Some(Duration::from_secs(REQUEST_TIMEOUT_SECS)))
         .build()
         .into();
 
@@ -194,9 +271,17 @@ fn call_chat_api(store: &AppStore, cfg: &AiConfig, system: &str, user: &str) -> 
         request = request.header("Authorization", format!("Bearer {}", cfg.api_key));
     }
 
-    let mut response = request
-        .send_json(body)
-        .map_err(|e| format!("无法连接 AI 接口 {url}：{e}"))?;
+    let mut response = request.send_json(body).map_err(|e| {
+        let err = e.to_string();
+        let lower = err.to_ascii_lowercase();
+        if lower.contains("timed out") || lower.contains("timeout") {
+            format!(
+                "模型推理超时（已等待 4 分钟）。这是本地模型读 diff、生成文本偏慢，把文件压成二进制不会更快，模型也读不懂压缩内容。可换更快的小模型、少勾选几个文件，或给 Ollama 足够 CPU/GPU。接口 {url}"
+            )
+        } else {
+            format!("无法连接 AI 接口 {url}：{err}")
+        }
+    })?;
     let status = u16::from(response.status());
     let value: serde_json::Value = response
         .body_mut()
@@ -206,8 +291,11 @@ fn call_chat_api(store: &AppStore, cfg: &AiConfig, system: &str, user: &str) -> 
         return Err(format_api_error(status, &value, &url, cfg));
     }
     let text = extract_content(&value).ok_or_else(|| {
+        let finish = value["choices"][0]["finish_reason"]
+            .as_str()
+            .unwrap_or("unknown");
         format!(
-            "AI 未返回提交信息。接口：{}，模型：{}",
+            "AI 未返回提交信息（finish_reason={finish}）。接口：{}，模型：{}。qwen3 若仍在思考，思考会占满 token 导致正文为空。",
             url, cfg.model
         )
     })?;
@@ -217,33 +305,35 @@ fn call_chat_api(store: &AppStore, cfg: &AiConfig, system: &str, user: &str) -> 
 fn chat_completions_url(base: &str) -> String {
     let base = base.trim().trim_end_matches('/');
     if base.ends_with("/chat/completions") {
-        base.to_string()
-    } else {
-        format!("{base}/chat/completions")
+        return base.to_string();
     }
+    if base.ends_with("/v1") || base.contains("/v1/") {
+        return format!("{base}/chat/completions");
+    }
+    format!("{base}/v1/chat/completions")
 }
 
 fn extract_content(value: &serde_json::Value) -> Option<String> {
     let message = &value["choices"][0]["message"];
-    if let Some(text) = message["content"].as_str() {
+    first_text(&message["content"]).or_else(|| first_text(&value["choices"][0]["text"]))
+}
+
+fn first_text(value: &serde_json::Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
         let text = text.trim();
         if !text.is_empty() {
             return Some(text.to_string());
         }
     }
-    if let Some(parts) = message["content"].as_array() {
+    if let Some(parts) = value.as_array() {
         let text = parts
             .iter()
             .filter_map(|part| part["text"].as_str().or_else(|| part.as_str()))
             .collect::<Vec<_>>()
             .join("");
-        if !text.trim().is_empty() {
-            return Some(text.trim().to_string());
-        }
-    }
-    if let Some(text) = value["choices"][0]["text"].as_str() {
-        if !text.trim().is_empty() {
-            return Some(text.trim().to_string());
+        let text = text.trim();
+        if !text.is_empty() {
+            return Some(text.to_string());
         }
     }
     None
@@ -276,24 +366,31 @@ fn format_api_error(status: u16, value: &serde_json::Value, url: &str, cfg: &AiC
             "AI 接口未授权（HTTP {status}）。请检查 API Key。当前模型 {}，接口 {}",
             cfg.model, url
         ),
-        404 => format!("AI 接口不存在（HTTP 404）：{url}，请确认地址是否包含 /v1"),
+        404 => format!(
+            "AI 接口返回 404：{detail}。当前模型「{}」，接口 {}。模型名必须和 ollama list 完全一致（例如 qwen3:1.7b、gemma-4-31B-it），不能简写成 qw3；若模型本身可用，再检查地址是否为 /v1/chat/completions",
+            cfg.model, url
+        ),
+        _ if is_context_overflow(status, detail) => {
+            format!("勾选文件的差异过大，模型上下文放不下（HTTP {status}）：{detail}。请减少勾选文件后重试。")
+        }
         _ => format!("AI 接口错误 HTTP {status}：{detail}（模型 {}，接口 {}）", cfg.model, url),
     }
-}
-
-fn truncate_utf8(text: &mut String, max_bytes: usize) -> bool {
-    if text.len() <= max_bytes {
-        return false;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text.truncate(end);
-    true
 }
 
 fn looks_like_url(value: &str) -> bool {
     let lower = value.trim().to_ascii_lowercase();
     lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+fn looks_mostly_english(text: &str) -> bool {
+    let mut cjk = 0usize;
+    let mut letters = 0usize;
+    for ch in text.chars() {
+        if ('\u{4e00}'..='\u{9fff}').contains(&ch) {
+            cjk += 1;
+        } else if ch.is_ascii_alphabetic() {
+            letters += 1;
+        }
+    }
+    cjk == 0 && letters > 8 || letters > cjk.saturating_mul(3) && letters > 12
 }

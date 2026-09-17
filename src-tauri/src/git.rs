@@ -226,12 +226,6 @@ pub fn discover_repo(path: &str) -> Result<(PathBuf, RepoInfo), String> {
     Ok((repo, info))
 }
 
-pub fn open_repo(state: &AppState, path: &str) -> Result<RepoInfo, String> {
-    let (repo, info) = discover_repo(path)?;
-    state.set_repo(repo)?;
-    Ok(info)
-}
-
 pub fn repo_info(repo: &Path) -> Result<RepoInfo, String> {
     let detached = run_git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])
         .map(|s| s.trim() == "HEAD")
@@ -772,6 +766,14 @@ fn parse_blame(raw: &str) -> Vec<BlameLine> {
         }
     }
     lines
+}
+
+pub fn worktree_blame(repo: &Path, path: &str) -> Result<Vec<BlameLine>, String> {
+    let (rel, _) = resolve_worktree_file(repo, path)?;
+    let raw = run_git(repo, &["blame", "--line-porcelain", "-w", "--", &rel])
+        .or_else(|_| run_git(repo, &["blame", "--line-porcelain", "-w", "HEAD", "--", &rel]))
+        .unwrap_or_default();
+    Ok(parse_blame(&raw))
 }
 
 fn blame_lines(repo: &Path, rev: &str, path: &str) -> Vec<BlameLine> {

@@ -6,7 +6,7 @@ mod updater;
 mod watch;
 
 use git::{
-    AppState, BranchInfo, FileDiff, FilePreview, GitCommit, GitFile, MergeCompare, MergeFileContent,
+    AppState, BlameLine, BranchInfo, FileDiff, FilePreview, GitCommit, GitFile, MergeCompare, MergeFileContent,
     MergeOutcome, MergePreview, MergeState, RemoteDetail, RepoInfo, StatusPayload,
 };
 use std::path::PathBuf;
@@ -422,6 +422,16 @@ async fn open_in_os(state: State<'_, AppState>, path: String, repo: Option<Strin
 }
 
 #[tauri::command]
+async fn get_file_blame(
+    state: State<'_, AppState>,
+    path: String,
+    repo: Option<String>,
+) -> Result<Vec<BlameLine>, String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::worktree_blame(&repo, &path)).await
+}
+
+#[tauri::command]
 async fn preview_file(
     state: State<'_, AppState>,
     path: String,
@@ -781,6 +791,7 @@ pub fn run() {
             abs_worktree_path,
             reveal_in_os,
             open_in_os,
+            get_file_blame,
             preview_file,
             save_worktree_file,
             copy_worktree,
