@@ -59,6 +59,10 @@ export function getCommitFiles(repo: string | undefined, hash: string) {
   return invoke<GitFile[]>("get_commit_files", withRepo(repo, { hash }));
 }
 
+export function getCommitMessage(repo: string | undefined, hash: string) {
+  return invoke<string>("get_commit_message", withRepo(repo, { hash }));
+}
+
 export function getBranches(repo?: string) {
   return invoke<BranchInfo[]>("get_branches", withRepo(repo));
 }
@@ -73,6 +77,10 @@ export function stageFile(repo: string | undefined, path: string) {
 
 export function unstageFile(repo: string | undefined, path: string) {
   return invoke<void>("unstage_file", withRepo(repo, { path }));
+}
+
+export function getHeadCommitMessage(repo?: string) {
+  return invoke<string>("get_head_commit_message", withRepo(repo));
 }
 
 export function commitChanges(

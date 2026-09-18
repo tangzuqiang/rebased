@@ -71,6 +71,16 @@ async fn get_commit_files(
 }
 
 #[tauri::command]
+async fn get_commit_message(
+    state: State<'_, AppState>,
+    hash: String,
+    repo: Option<String>,
+) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::commit_message(&path, &hash)).await
+}
+
+#[tauri::command]
 async fn get_branches(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<BranchInfo>, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::branches(&path)).await
@@ -97,6 +107,12 @@ async fn stage_file(state: State<'_, AppState>, path: String, repo: Option<Strin
 async fn unstage_file(state: State<'_, AppState>, path: String, repo: Option<String>) -> Result<(), String> {
     let repo = repo_dir(&state, repo)?;
     run_blocking(move || git::unstage(&repo, &path)).await
+}
+
+#[tauri::command]
+async fn get_head_commit_message(state: State<'_, AppState>, repo: Option<String>) -> Result<String, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::head_commit_message(&path)).await
 }
 
 #[tauri::command]
@@ -745,10 +761,12 @@ pub fn run() {
             get_status,
             get_log,
             get_commit_files,
+            get_commit_message,
             get_branches,
             get_recent_branches,
             stage_file,
             unstage_file,
+            get_head_commit_message,
             commit_changes,
             checkout_branch,
             fetch_remote,

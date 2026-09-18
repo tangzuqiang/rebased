@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import type { GitFile } from "../types";
+import { formatDateTime } from "../path";
+import type { GitCommit, GitFile } from "../types";
 import Icons from "./Icons.vue";
 
 const props = defineProps<{
   files: GitFile[];
+  message?: string;
+  commit?: GitCommit | null;
 }>();
 
 const grouped = computed(() => {
@@ -18,6 +21,8 @@ const grouped = computed(() => {
   }
   return [...tree.entries()];
 });
+
+const fullMessage = computed(() => props.message?.trim() || props.commit?.message || "");
 
 function fileName(path: string) {
   return path.split(/[\\/]/).pop() ?? path;
@@ -45,6 +50,17 @@ function fileName(path: string) {
           <span class="name">{{ fileName(file.path) }}</span>
         </div>
       </template>
+    </div>
+    <div class="detail">
+      <template v-if="commit || fullMessage">
+        <div v-if="commit" class="meta">
+          <span class="hash">{{ commit.shortHash }}</span>
+          <span>{{ commit.author }}</span>
+          <span>{{ formatDateTime(commit.timestamp) }}</span>
+        </div>
+        <pre v-if="fullMessage" class="body">{{ fullMessage }}</pre>
+      </template>
+      <p v-else class="empty-hint">左键选择一条提交查看完整说明</p>
     </div>
   </aside>
 </template>
@@ -74,6 +90,42 @@ function fileName(path: string) {
 
 .scroll {
   flex: 1;
+  min-height: 80px;
+  overflow: auto;
+}
+
+.detail {
+  flex: 1;
+  min-height: 96px;
+  max-height: 50%;
+  overflow: auto;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.hash {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--text);
+}
+
+.body {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
 }
 
 .dir,

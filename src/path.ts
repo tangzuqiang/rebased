@@ -6,6 +6,14 @@ export function sameRepo(a: string, b: string) {
   return normalizeRepoPath(a) === normalizeRepoPath(b);
 }
 
+export function formatDateTime(timestamp: number) {
+  if (!timestamp) return "";
+  const date = new Date(timestamp * 1000);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 export function formatLogDate(timestamp: number) {
   if (!timestamp) return "";
   const date = new Date(timestamp * 1000);

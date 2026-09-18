@@ -413,6 +413,15 @@ pub fn log(repo: &Path, limit: u32, refs: &[String]) -> Result<Vec<GitCommit>, S
     Ok(commits)
 }
 
+pub fn commit_message(repo: &Path, hash: &str) -> Result<String, String> {
+    let text = run_git(repo, &["log", "-1", "--pretty=%B", hash])?;
+    Ok(text.trim_end().to_string())
+}
+
+pub fn head_commit_message(repo: &Path) -> Result<String, String> {
+    commit_message(repo, "HEAD")
+}
+
 pub fn commit_files(repo: &Path, hash: &str) -> Result<Vec<GitFile>, String> {
     let raw = run_git(
         repo,

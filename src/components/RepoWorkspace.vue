@@ -12,6 +12,7 @@ import {
   fetchRemote,
   getBranches,
   getCommitFiles,
+  getCommitMessage,
   getLog,
   getRecentBranches,
   getMergeState,
@@ -81,6 +82,7 @@ const changes = ref<GitFile[]>([]);
 const unversioned = ref<GitFile[]>([]);
 const commits = ref<GitCommit[]>([]);
 const commitFiles = ref<GitFile[]>([]);
+const commitMessage = ref("");
 const selectedHash = ref("");
 const busy = ref(false);
 const statusText = ref("就绪");
@@ -124,6 +126,7 @@ const worktreeCreateNew = ref(false);
 
 const graph = computed(() => buildGraph(commits.value));
 const repoPath = computed(() => repo.value?.path ?? props.path);
+const selectedCommit = computed(() => commits.value.find((item) => item.hash === selectedHash.value) ?? null);
 const fsDirty = ref(false);
 const watchingPath = ref("");
 const isDirty = computed(() => fsDirty.value || changes.value.length + unversioned.value.length > 0);
@@ -253,7 +256,10 @@ async function refreshLog() {
       selectedHash.value = logResult[0].hash;
     }
     if (selectedHash.value) {
-      commitFiles.value = await getCommitFiles(current, selectedHash.value).catch(() => []);
+      await loadCommitDetails(selectedHash.value);
+    } else {
+      commitFiles.value = [];
+      commitMessage.value = "";
     }
   } catch (error) {
     if (!commits.value.length) {
@@ -356,9 +362,20 @@ function openAmend() {
   void openCommit(true);
 }
 
+async function loadCommitDetails(hash: string) {
+  const current = repoPath.value;
+  const [files, message] = await Promise.all([
+    getCommitFiles(current, hash).catch(() => [] as GitFile[]),
+    getCommitMessage(current, hash).catch(() => ""),
+  ]);
+  if (current !== repoPath.value || selectedHash.value !== hash) return;
+  commitFiles.value = files;
+  commitMessage.value = message;
+}
+
 async function handleSelect(hash: string) {
   selectedHash.value = hash;
-  commitFiles.value = await getCommitFiles(repoPath.value, hash).catch(() => []);
+  await loadCommitDetails(hash);
 }
 
 async function handleCommit(payload: {
@@ -942,7 +959,7 @@ onUnmounted(() => {
           @amend="openAmend"
           @checkout="handleCheckout"
         />
-        <FilesPanel :files="commitFiles" />
+        <FilesPanel :files="commitFiles" :message="commitMessage" :commit="selectedCommit" />
       </main>
       <TerminalPanel
         v-if="terminalReady"

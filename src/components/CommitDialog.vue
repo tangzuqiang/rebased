@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch } from "vue";
-import { generateCommitMessage, getWorkingDiff } from "../api";
+import { generateCommitMessage, getHeadCommitMessage, getWorkingDiff } from "../api";
 import { parsePatch } from "../patch";
 import type { DiffLine, GitFile, RepoInfo } from "../types";
 import Icons from "./Icons.vue";
@@ -233,9 +233,30 @@ watch(
   },
 );
 
+async function loadHeadMessage() {
+  try {
+    const text = await getHeadCommitMessage(props.repo.path);
+    if (text.trim()) {
+      message.value = text;
+    }
+  } catch {
+    /* 空仓库没有上次提交 */
+  }
+}
+
+watch(amend, (on) => {
+  if (on && !message.value.trim()) {
+    void loadHeadMessage();
+  }
+});
+
 watch([activePath, activeUntracked], () => {
   void loadDiff();
 });
+
+if (amend.value) {
+  void loadHeadMessage();
+}
 
 onUnmounted(() => {
   stopTyping();
