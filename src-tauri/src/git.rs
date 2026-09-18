@@ -643,13 +643,6 @@ fn untracked_diff(repo: &Path, path: &str) -> Result<FileDiff, String> {
             patch: String::new(),
         });
     }
-    if bytes.len() > 512 * 1024 {
-        return Ok(FileDiff {
-            path: path.to_string(),
-            binary: true,
-            patch: String::new(),
-        });
-    }
     let text = String::from_utf8_lossy(&bytes);
     let lines: Vec<&str> = text.lines().collect();
     let mut patch = format!(

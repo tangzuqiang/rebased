@@ -162,9 +162,6 @@ fn merge_ai(cfg: &mut AiConfig, file: AiConfig) {
     }
 }
 
-/// 接近 PhpStorm / AI Commits：勾选文件送完整 diff，不静默截断。
-/// 超限直接失败，提示减少勾选，避免本地小模型被超大 prompt 拖死。
-const MAX_DIFF_BYTES: usize = 120_000;
 const REQUEST_TIMEOUT_SECS: u64 = 240;
 const COMMIT_SYSTEM_PROMPT: &str = "\
 你是 Git 提交信息助手。必须用简体中文写出详细提交说明，禁止整段英文。\
@@ -192,7 +189,6 @@ enum ThinkMode {
 fn collect_diff_context(repo: &std::path::Path, paths: &[DiffPath]) -> Result<(Vec<String>, String), String> {
     let mut names = Vec::new();
     let mut snippets = Vec::new();
-    let mut total = 0usize;
     for item in paths {
         names.push(item.path.clone());
         let diff = git::working_diff(repo, &item.path, item.untracked).unwrap_or_else(|_| git::FileDiff {
@@ -207,20 +203,9 @@ fn collect_diff_context(repo: &std::path::Path, paths: &[DiffPath]) -> Result<(V
         } else {
             format!("文件：{}\n{}", item.path, diff.patch)
         };
-        total += body.len();
-        if total > MAX_DIFF_BYTES {
-            return Err(diff_too_large_message(names.len(), paths.len(), total));
-        }
         snippets.push(body);
     }
     Ok((names, snippets.join("\n\n")))
-}
-
-fn diff_too_large_message(reached: usize, selected: usize, bytes: usize) -> String {
-    format!(
-        "勾选了 {selected} 个文件，差异约 {} KB，超出模型可处理范围（已读到第 {reached} 个文件）。请减少勾选后再生成。二进制文件不会发送内容。",
-        bytes / 1024
-    )
 }
 
 fn is_context_overflow(status: u16, detail: &str) -> bool {
