@@ -57,7 +57,7 @@ pub fn generate_commit_message(
             prompt
         ),
         ChatOptions {
-            think: true,
+            think: false,
             max_tokens: 2048,
         },
     )?;
@@ -182,6 +182,13 @@ struct ChatOptions {
     max_tokens: u32,
 }
 
+#[derive(Clone, Copy)]
+enum ThinkMode {
+    On,
+    Off,
+    Omit,
+}
+
 fn collect_diff_context(repo: &std::path::Path, paths: &[DiffPath]) -> Result<(Vec<String>, String), String> {
     let mut names = Vec::new();
     let mut snippets = Vec::new();
@@ -240,66 +247,122 @@ fn call_chat_api(
 ) -> Result<String, String> {
     let _ = store;
     let url = chat_completions_url(&cfg.base_url);
-    let mut body = serde_json::json!({
-        "model": cfg.model,
-        "keep_alive": -1,
-        "think": opts.think,
-        "temperature": 0.3,
-        "max_tokens": opts.max_tokens,
-        "stream": false,
-        "messages": [
-            { "role": "system", "content": system },
-            { "role": "user", "content": user }
-        ]
-    });
-    body["reasoning_effort"] = if opts.think {
-        serde_json::json!("low")
-    } else {
-        serde_json::json!("none")
-    };
-
+    let mut think_mode = think_mode_for(&cfg.model, opts.think);
+    let mut retried_empty = false;
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(REQUEST_TIMEOUT_SECS)))
         .build()
         .into();
 
-    let mut request = agent
-        .post(&url)
-        .header("Content-Type", "application/json");
-    if !cfg.api_key.is_empty() {
-        request = request.header("Authorization", format!("Bearer {}", cfg.api_key));
-    }
-
-    let mut response = request.send_json(body).map_err(|e| {
-        let err = e.to_string();
-        let lower = err.to_ascii_lowercase();
-        if lower.contains("timed out") || lower.contains("timeout") {
-            format!(
-                "模型推理超时（已等待 4 分钟）。这是本地模型读 diff、生成文本偏慢，把文件压成二进制不会更快，模型也读不懂压缩内容。可换更快的小模型、少勾选几个文件，或给 Ollama 足够 CPU/GPU。接口 {url}"
-            )
-        } else {
-            format!("无法连接 AI 接口 {url}：{err}")
+    loop {
+        let body = chat_request_body(cfg, system, user, opts.max_tokens, think_mode);
+        let mut request = agent
+            .post(&url)
+            .header("Content-Type", "application/json");
+        if !cfg.api_key.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", cfg.api_key));
         }
-    })?;
-    let status = u16::from(response.status());
-    let value: serde_json::Value = response
-        .body_mut()
-        .read_json()
-        .map_err(|e| format!("AI 接口返回无法解析：{e}"))?;
-    if !(200..300).contains(&status) {
-        return Err(format_api_error(status, &value, &url, cfg));
-    }
-    let text = extract_content(&value).ok_or_else(|| {
+        let mut response = request.send_json(body).map_err(|e| {
+            let err = e.to_string();
+            let lower = err.to_ascii_lowercase();
+            if lower.contains("timed out") || lower.contains("timeout") {
+                format!(
+                    "模型推理超时（已等待 4 分钟）。这是本地模型读 diff、生成文本偏慢，把文件压成二进制不会更快，模型也读不懂压缩内容。可换更快的小模型、少勾选几个文件，或给 Ollama 足够 CPU/GPU。接口 {url}"
+                )
+            } else {
+                format!("无法连接 AI 接口 {url}：{err}")
+            }
+        })?;
+        let status = u16::from(response.status());
+        let value: serde_json::Value = response
+            .body_mut()
+            .read_json()
+            .map_err(|e| format!("AI 接口返回无法解析：{e}"))?;
+        if !matches!(think_mode, ThinkMode::Omit) && status == 400 && thinking_not_supported(&value) {
+            think_mode = ThinkMode::Omit;
+            continue;
+        }
+        if !(200..300).contains(&status) {
+            return Err(format_api_error(status, &value, &url, cfg));
+        }
+        if let Some(text) = extract_content(&value) {
+            return Ok(clean_message(&text));
+        }
         let finish = value["choices"][0]["finish_reason"]
             .as_str()
             .unwrap_or("unknown");
-        format!(
-            "AI 未返回提交信息（finish_reason={finish}）。接口：{}，模型：{}。qwen3 若仍在思考，思考会占满 token 导致正文为空。",
+        if !retried_empty && finish == "length" && matches!(think_mode, ThinkMode::On) {
+            think_mode = ThinkMode::Off;
+            retried_empty = true;
+            continue;
+        }
+        return Err(format!(
+            "AI 未返回提交信息（finish_reason={finish}）。接口：{}，模型：{}。推理模型若把额度用在思考上，正文会为空。",
             url, cfg.model
-        )
-    })?;
-    Ok(clean_message(&text))
+        ));
+    }
+}
+
+fn chat_request_body(
+    cfg: &AiConfig,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+    think_mode: ThinkMode,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": cfg.model,
+        "keep_alive": -1,
+        "temperature": 0.3,
+        "max_tokens": max_tokens,
+        "stream": false,
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": user }
+        ]
+    });
+    match think_mode {
+        ThinkMode::On => {
+            body["think"] = serde_json::json!(true);
+            body["reasoning_effort"] = serde_json::json!("low");
+        }
+        ThinkMode::Off => {
+            body["think"] = serde_json::json!(false);
+            body["reasoning_effort"] = serde_json::json!("none");
+        }
+        ThinkMode::Omit => {}
+    }
+    body
+}
+
+fn think_mode_for(model: &str, want_think: bool) -> ThinkMode {
+    if !model_supports_thinking(model) {
+        ThinkMode::Omit
+    } else if want_think {
+        ThinkMode::On
+    } else {
+        ThinkMode::Off
+    }
+}
+
+fn model_supports_thinking(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    model.contains("qwen3")
+        || model.contains("deepseek-r1")
+        || model.contains("qwq")
+        || model.contains("gpt-oss")
+        || model.contains("thinking")
+}
+
+fn thinking_not_supported(value: &serde_json::Value) -> bool {
+    let detail = value["error"]["message"]
+        .as_str()
+        .or_else(|| value["error"].as_str())
+        .or_else(|| value["message"].as_str())
+        .unwrap_or("");
+    let lower = detail.to_ascii_lowercase();
+    lower.contains("does not support thinking") || detail.contains("不支持思考")
 }
 
 fn chat_completions_url(base: &str) -> String {
@@ -315,7 +378,32 @@ fn chat_completions_url(base: &str) -> String {
 
 fn extract_content(value: &serde_json::Value) -> Option<String> {
     let message = &value["choices"][0]["message"];
-    first_text(&message["content"]).or_else(|| first_text(&value["choices"][0]["text"]))
+    first_text(&message["content"])
+        .or_else(|| first_text(&value["choices"][0]["text"]))
+        .and_then(|text| {
+            let text = strip_think_tags(&text);
+            if text.is_empty() {
+                None
+            } else {
+                Some(text)
+            }
+        })
+}
+
+fn strip_think_tags(text: &str) -> String {
+    let mut rest = text;
+    let mut out = String::new();
+    while let Some(start) = rest.find("<think>") {
+        out.push_str(&rest[..start]);
+        if let Some(end) = rest[start..].find("</think>") {
+            rest = &rest[start + end + "</think>".len()..];
+        } else {
+            rest = "";
+            break;
+        }
+    }
+    out.push_str(rest);
+    out.trim().to_string()
 }
 
 fn first_text(value: &serde_json::Value) -> Option<String> {
