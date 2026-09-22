@@ -452,7 +452,7 @@ defineExpose({
             <span class="col-date muted">{{ formatLogDate(commit.timestamp) }}</span>
           </button>
           <div v-if="logLoading && !commits.length" class="empty-hint">正在加载提交日志…</div>
-          <div v-else-if="!filtered.length" class="empty-hint">没有匹配的提交</div>
+          <div v-else-if="!filtered.length" class="empty-hint">{{ commits.length ? "没有匹配的提交" : "暂无提交" }}</div>
         </div>
       </div>
     </div>

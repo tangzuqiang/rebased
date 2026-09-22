@@ -31,7 +31,7 @@ export async function pickAndOpenRepo(): Promise<RepoInfo | null> {
   const selected = await open({
     directory: true,
     multiple: false,
-    title: "打开 Git 仓库",
+    title: "打开目录",
   });
   if (!selected || Array.isArray(selected)) {
     return null;
@@ -77,6 +77,13 @@ export function stageFile(repo: string | undefined, path: string) {
 
 export function unstageFile(repo: string | undefined, path: string) {
   return invoke<void>("unstage_file", withRepo(repo, { path }));
+}
+
+export function discardWorktreeChanges(
+  repo: string | undefined,
+  paths: { path: string; untracked: boolean }[],
+) {
+  return invoke<string>("discard_worktree_changes", withRepo(repo, { paths }));
 }
 
 export function getHeadCommitMessage(repo?: string) {

@@ -28,6 +28,7 @@ const emit = defineEmits<{
   commit: [];
   push: [];
   merge: [];
+  rollback: [];
   conflicts: [];
   settings: [];
   files: [];
@@ -63,13 +64,14 @@ function toggleBranch() {
   }
 }
 
-function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branch") {
+function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branch" | "rollback") {
   branchOpen.value = false;
   if (action === "commit") emit("commit");
   else if (action === "push") emit("push");
   else if (action === "merge") emit("merge");
   else if (action === "fetch") emit("fetch");
   else if (action === "new-branch") emit("newBranch");
+  else if (action === "rollback") emit("rollback");
   else emit("pull");
 }
 </script>
@@ -142,6 +144,7 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branc
           获取
         </button>
         <button type="button" :disabled="busy" @click="run('merge')">合并…</button>
+        <button type="button" :disabled="busy || !dirty" @click="run('rollback')">回滚…</button>
         <button type="button" :disabled="busy" @click="run('new-branch')">新建分支…</button>
         <button v-if="merging" type="button" @click="branchOpen = false; emit('conflicts')">解决冲突…</button>
         <div class="divider" />

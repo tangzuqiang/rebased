@@ -110,6 +110,16 @@ async fn unstage_file(state: State<'_, AppState>, path: String, repo: Option<Str
 }
 
 #[tauri::command]
+async fn discard_worktree_changes(
+    state: State<'_, AppState>,
+    paths: Vec<git::WorktreePathEntry>,
+    repo: Option<String>,
+) -> Result<String, String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::discard_worktree_changes(&repo, &paths)).await
+}
+
+#[tauri::command]
 async fn get_head_commit_message(state: State<'_, AppState>, repo: Option<String>) -> Result<String, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::head_commit_message(&path)).await
@@ -766,6 +776,7 @@ pub fn run() {
             get_recent_branches,
             stage_file,
             unstage_file,
+            discard_worktree_changes,
             get_head_commit_message,
             commit_changes,
             checkout_branch,
