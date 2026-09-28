@@ -40,7 +40,7 @@ export async function pickDirectory(title: string): Promise<string | null> {
   const selected = await open({
     directory: true,
     multiple: false,
-    title: "打开目录",
+    title,
   });
   return pickedPath(selected);
 }

@@ -228,24 +228,11 @@ fn folder_info(path: &Path) -> RepoInfo {
     }
 }
 
-        Err(_) => ("HEAD".to_string(), true),
-    }
-}
-
 pub fn discover_repo(path: &str) -> Result<(PathBuf, RepoInfo), String> {
-    let input = PathBuf::from(path);
     let input = PathBuf::from(path.trim());
     if !input.exists() {
         return Err(format!("路径不存在：{path}"));
     }
-    if !input.is_dir() {
-        return Err("请选择一个目录".to_string());
-    }
-
-    if !inside_work_tree(&input) {
-        run_git(&input, &["init"])?;
-    }
-
     if !input.is_dir() {
         return Err(format!("请选择一个目录：{path}"));
     }
@@ -270,7 +257,6 @@ pub fn repo_info(repo: &Path) -> Result<RepoInfo, String> {
         Some(name) => name.to_string(),
         None => "未提交".to_string(),
     };
-    let (branch, detached) = current_head(repo);
 
     let mut ahead = 0u32;
     let mut behind = 0u32;
@@ -530,23 +516,6 @@ pub fn branches(repo: &Path) -> Result<Vec<BranchInfo>, String> {
                 name: name.to_string(),
                 upstream: String::new(),
             });
-        }
-    }
-    if let Some(current) = symbolic_head(repo) {
-        if !list
-            .iter()
-            .any(|item| item.name == current && item.kind == "local")
-        {
-            list.insert(
-                0,
-                BranchInfo {
-                    name: current,
-                    current: true,
-                    remote: false,
-                    kind: "local".to_string(),
-                    upstream: String::new(),
-                },
-            );
         }
     }
     Ok(list)

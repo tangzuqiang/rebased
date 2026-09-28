@@ -180,7 +180,7 @@ const viewerRows = computed<VRow[]>(() => {
     const theirsChanged = isSideChange(row.theirsKind);
 
     if (oursChanged || theirsChanged) {
-      const hunk = hunkAt(i);
+      const hunk = hunkOf(i);
       result.push(makeViewerRow(i, hl, hunk));
       i++;
     } else {
@@ -244,6 +244,7 @@ function isSideChange(kind: DiffKind) {
 }
 
 function hunkKind(row: Diff3Row): "ours" | "theirs" | "conflict" | "" {
+  if (row.forceConflict) return "conflict";
   const ours = isSideChange(row.oursKind);
   const theirs = isSideChange(row.theirsKind);
   if (ours && theirs) return "conflict";
@@ -274,6 +275,10 @@ function lineFrom(row: Diff3Row, side: "ours" | "theirs" | "base") {
 }
 
 function defaultResultLine(row: Diff3Row) {
+  if (row.forceConflict) return lineFrom(row, "ours");
+  const oursChange = isSideChange(row.oursKind);
+  const theirsChange = isSideChange(row.theirsKind);
+  if (theirsChange && !oursChange) return lineFrom(row, "theirs");
   return lineFrom(row, "ours");
 }
 
@@ -326,10 +331,6 @@ function markSettled(hunk: Hunk, patch: { ours?: boolean; theirs?: boolean }) {
 
 function hunkKey(hunk: Hunk) {
   return `${hunk.start}:${hunk.end}`;
-}
-
-function hunkAt(index: number) {
-  return hunks.value.find((h) => h.start === index);
 }
 
 function hunkOf(index: number) {
