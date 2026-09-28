@@ -196,7 +196,6 @@ onMounted(async () => {
       :path="tab.path"
       :active="sameRepo(tab.path, activePath)"
       :recent="recent"
-      :version="version"
       @open="handleOpen"
       @open-path="handleOpenPath"
       @settings="showSettings = true"

@@ -66,7 +66,6 @@ const props = defineProps<{
   path: string;
   active: boolean;
   recent: RecentProject[];
-  version?: string;
 }>();
 
 const emit = defineEmits<{
@@ -940,7 +939,6 @@ onUnmounted(() => {
         :dirty="isDirty"
         :merging="Boolean(conflictState?.inProgress)"
         :recent="recent"
-        :version="version"
         :files-open="showFiles"
         :terminal-open="showTerminal"
         :busy-text="statusText"

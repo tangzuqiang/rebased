@@ -1,6 +1,6 @@
 [package]
 name = "rebased"
-version = "0.1.10"
+version = "0.1.12"
 description = "A git client UI reconstructed with Tauri"
 authors = ["you"]
 edition = "2021"
