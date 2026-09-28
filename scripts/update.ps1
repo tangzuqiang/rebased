@@ -106,6 +106,27 @@ function Import-UpdateEnv {
     }
 }
 
+function Get-PythonExe {
+    $candidates = @(
+        { Get-Command python -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source },
+        { Get-Command py -ErrorAction SilentlyContinue | ForEach-Object { "py -3" } },
+        { Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe" },
+        { Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe" },
+        { Join-Path $env:LOCALAPPDATA "Programs\Python\Python313\python.exe" }
+    )
+    foreach ($getPath in $candidates) {
+        $path = & $getPath
+        if (-not $path) { continue }
+        if ($path -eq "py -3") {
+            return $path
+        }
+        if ((Test-Path $path) -and ($path -like "*.exe")) {
+            return $path
+        }
+    }
+    throw "找不到 Python。请安装 Python 3 并执行：pip install paramiko"
+}
+
 function Publish-Installer([string]$Installer, [string]$Version, [string]$Notes) {
     Import-UpdateEnv
 
@@ -149,7 +170,13 @@ function Publish-Installer([string]$Installer, [string]$Version, [string]$Notes)
     $env:UPDATE_URL = $feedUrl
     $env:UPDATE_SHA256 = $hash
     $uploader = Join-Path $PSScriptRoot "upload-update.py"
-    python $uploader $exe.FullName $manifestPath $fileName
+    $python = Get-PythonExe
+    Write-Host "  使用 Python：$python"
+    if ($python -eq "py -3") {
+        & py -3 $uploader $exe.FullName $manifestPath $fileName
+    } else {
+        & $python $uploader $exe.FullName $manifestPath $fileName
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "上传失败，退出码 $LASTEXITCODE"
     }

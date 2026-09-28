@@ -228,11 +228,24 @@ fn folder_info(path: &Path) -> RepoInfo {
     }
 }
 
+        Err(_) => ("HEAD".to_string(), true),
+    }
+}
+
 pub fn discover_repo(path: &str) -> Result<(PathBuf, RepoInfo), String> {
     let input = PathBuf::from(path);
+    let input = PathBuf::from(path.trim());
     if !input.exists() {
         return Err(format!("路径不存在：{path}"));
     }
+    if !input.is_dir() {
+        return Err("请选择一个目录".to_string());
+    }
+
+    if !inside_work_tree(&input) {
+        run_git(&input, &["init"])?;
+    }
+
     if !input.is_dir() {
         return Err(format!("请选择一个目录：{path}"));
     }
@@ -257,6 +270,7 @@ pub fn repo_info(repo: &Path) -> Result<RepoInfo, String> {
         Some(name) => name.to_string(),
         None => "未提交".to_string(),
     };
+    let (branch, detached) = current_head(repo);
 
     let mut ahead = 0u32;
     let mut behind = 0u32;
@@ -518,6 +532,23 @@ pub fn branches(repo: &Path) -> Result<Vec<BranchInfo>, String> {
             });
         }
     }
+    if let Some(current) = symbolic_head(repo) {
+        if !list
+            .iter()
+            .any(|item| item.name == current && item.kind == "local")
+        {
+            list.insert(
+                0,
+                BranchInfo {
+                    name: current,
+                    current: true,
+                    remote: false,
+                    kind: "local".to_string(),
+                    upstream: String::new(),
+                },
+            );
+        }
+    }
     Ok(list)
 }
 
@@ -573,6 +604,53 @@ pub fn unstage(repo: &Path, path: &str) -> Result<(), String> {
     let actual = display_to_path(path);
     run_git(repo, &["restore", "--staged", "--", &actual])?;
     Ok(())
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct WorktreePathEntry {
+    pub path: String,
+    pub untracked: bool,
+}
+
+pub fn discard_worktree_changes(repo: &Path, items: &[WorktreePathEntry]) -> Result<String, String> {
+    if items.is_empty() {
+        return Err("请至少选择一个文件".to_string());
+    }
+
+    let mut tracked = Vec::new();
+    let mut untracked = Vec::new();
+    for item in items {
+        let actual = display_to_path(&item.path);
+        if actual.trim().is_empty() {
+            continue;
+        }
+        if item.untracked {
+            untracked.push(actual);
+        } else {
+            tracked.push(actual);
+        }
+    }
+    tracked.sort();
+    tracked.dedup();
+    untracked.sort();
+    untracked.dedup();
+
+    if tracked.is_empty() && untracked.is_empty() {
+        return Err("没有可回滚的文件".to_string());
+    }
+
+    for path in &tracked {
+        run_git(
+            repo,
+            &["restore", "--staged", "--worktree", "--source=HEAD", "--", path],
+        )?;
+    }
+    for path in &untracked {
+        run_git(repo, &["clean", "-fd", "--", path])?;
+    }
+
+    let count = tracked.len() + untracked.len();
+    Ok(format!("已回滚 {count} 个文件"))
 }
 
 pub fn commit(repo: &Path, message: &str, amend: bool, include_paths: &[String]) -> Result<(), String> {

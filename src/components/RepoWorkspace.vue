@@ -6,6 +6,7 @@ import {
   applyPatch,
   checkoutBranch,
   commitChanges,
+  discardWorktreeChanges,
   createBranchAt,
   deleteBranch,
   deleteTag,
@@ -55,6 +56,7 @@ import LogPanel from "./LogPanel.vue";
 import MergeDialog from "./MergeDialog.vue";
 import MergeEditorPage from "./MergeEditorPage.vue";
 import PushDialog from "./PushDialog.vue";
+import RollbackDialog from "./RollbackDialog.vue";
 import Modal from "./Modal.vue";
 import StatusBar from "./StatusBar.vue";
 import TerminalPanel from "./TerminalPanel.vue";
@@ -93,6 +95,7 @@ const terminalReady = ref(false);
 const termStartCwd = ref("");
 const termSpawnSeq = ref(0);
 const showCommit = ref(false);
+const showRollback = ref(false);
 const showPush = ref(false);
 const showMerge = ref(false);
 const showConflicts = ref(false);
@@ -370,6 +373,15 @@ async function openCommit(amend = false) {
   showCommit.value = true;
 }
 
+async function openRollback() {
+  await refreshStatus();
+  if (!changes.value.length && !unversioned.value.length) {
+    notify("工作区没有可回滚的变更", "error");
+    return;
+  }
+  showRollback.value = true;
+}
+
 async function handleRefsChange(refs: string[]) {
   logRefs.value = refs;
   if (!repo.value) return;
@@ -403,6 +415,22 @@ async function loadCommitDetails(hash: string) {
 async function handleSelect(hash: string) {
   selectedHash.value = hash;
   await loadCommitDetails(hash);
+}
+
+async function handleDiscard(paths: { path: string; untracked: boolean }[]) {
+  const message = await withBusy(
+    "正在回滚…",
+    async () => {
+      const result = await discardWorktreeChanges(repoPath.value, paths);
+      await refreshStatus();
+      return result;
+    },
+    { errorPopup: true, errorTitle: "回滚失败" },
+  );
+  if (message) {
+    notify(message);
+    showRollback.value = false;
+  }
 }
 
 async function handleCommit(payload: {
@@ -953,6 +981,7 @@ onUnmounted(() => {
         @commit="openCommit()"
         @push="showPush = true"
         @merge="showMerge = true"
+        @rollback="openRollback()"
         @new-branch="openNewBranchFromCurrent"
         @conflicts="openConflicts"
         @settings="emit('settings')"
@@ -1019,6 +1048,15 @@ onUnmounted(() => {
         :start-amend="startAmend"
         @close="showCommit = false; startAmend = false"
         @commit="handleCommit"
+      />
+      <RollbackDialog
+        v-if="active && showRollback && repo"
+        :repo="repo"
+        :changes="changes"
+        :unversioned="unversioned"
+        :busy="busy"
+        @close="showRollback = false"
+        @discard="handleDiscard"
       />
       <PushDialog
         v-if="active && showPush"

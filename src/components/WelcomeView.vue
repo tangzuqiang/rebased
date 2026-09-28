@@ -29,7 +29,7 @@ const path = ref("");
     <div class="path-row">
       <input
         v-model="path"
-        placeholder="或粘贴仓库路径后回车"
+        placeholder="或粘贴目录路径后回车"
         @keydown.enter="path.trim() && emit('openPath', path.trim())"
       />
     </div>
