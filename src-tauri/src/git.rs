@@ -49,6 +49,7 @@ pub struct RepoInfo {
     pub has_remote: bool,
     pub head: String,
     pub user_name: String,
+    pub is_git: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -208,36 +209,53 @@ fn repo_name(path: &Path) -> String {
         .to_string()
 }
 
+fn has_git(path: &Path) -> bool {
+    run_git(path, &["rev-parse", "--git-dir"]).is_ok()
+}
+
+fn folder_info(path: &Path) -> RepoInfo {
+    RepoInfo {
+        path: path.to_string_lossy().into_owned(),
+        name: repo_name(path),
+        branch: String::new(),
+        detached: false,
+        ahead: 0,
+        behind: 0,
+        has_remote: false,
+        head: String::new(),
+        user_name: String::new(),
+        is_git: false,
+    }
+}
+
 pub fn discover_repo(path: &str) -> Result<(PathBuf, RepoInfo), String> {
     let input = PathBuf::from(path);
     if !input.exists() {
         return Err(format!("路径不存在：{path}"));
     }
-
-    let toplevel = run_git(&input, &["rev-parse", "--show-toplevel"])?
-        .trim()
-        .to_string();
-    if toplevel.is_empty() {
-        return Err("所选目录不是 Git 仓库".to_string());
+    if !input.is_dir() {
+        return Err(format!("请选择一个目录：{path}"));
     }
-
-    let repo = PathBuf::from(&toplevel);
-    let info = repo_info(&repo)?;
-    Ok((repo, info))
+    Ok((input.clone(), repo_info(&input)?))
 }
 
 pub fn repo_info(repo: &Path) -> Result<RepoInfo, String> {
-    let detached = run_git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])
-        .map(|s| s.trim() == "HEAD")
-        .unwrap_or(false);
+    if !has_git(repo) {
+        return Ok(folder_info(repo));
+    }
 
-    let branch = if detached {
-        let short = run_git(repo, &["rev-parse", "--short", "HEAD"])?;
-        format!("HEAD ({})", short.trim())
-    } else {
-        run_git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])?
-            .trim()
-            .to_string()
+    let head_name = run_git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let detached = head_name.as_deref() == Some("HEAD");
+
+    let branch = match head_name.as_deref() {
+        Some("HEAD") => run_git(repo, &["rev-parse", "--short", "HEAD"])
+            .map(|s| format!("HEAD ({})", s.trim()))
+            .unwrap_or_else(|_| "未提交".to_string()),
+        Some(name) => name.to_string(),
+        None => "未提交".to_string(),
     };
 
     let mut ahead = 0u32;
@@ -280,6 +298,7 @@ pub fn repo_info(repo: &Path) -> Result<RepoInfo, String> {
         has_remote,
         head,
         user_name,
+        is_git: true,
     })
 }
 
@@ -1260,6 +1279,9 @@ fn localize_git_error(err: &str) -> String {
     }
     if lower.contains("authentication failed") || lower.contains("could not read from remote") {
         return "远程认证失败，或无法连接远程仓库".to_string();
+    }
+    if lower.contains("not a git repository") {
+        return "所选目录不是 Git 仓库（需要包含 .git）".to_string();
     }
     if lower.contains("not possible to fast-forward") || lower.contains("divergent branches") {
         return "无法快进拉取，本地与远程存在分叉".to_string();

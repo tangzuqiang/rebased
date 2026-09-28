@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import "highlight.js/styles/atom-one-dark.css";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { absWorktreePath, copyWorktreeToClipboard, deleteWorktree, getFileBlame, listWorktree, openInOs, previewFile, renameWorktree, revealInOs, saveWorktreeFile } from "../api";
 import { commentPrefix, findInTextarea, handleIdeEditorKey, writeTextarea } from "../editorKeys";
 import { escapeHtml, highlightCode, languageFromPath } from "../highlight";
 import { notify } from "../notify";
+import { sameRepo } from "../path";
 import type { BlameLine, FilePreview } from "../types";
 import Icons from "./Icons.vue";
 import Modal from "./Modal.vue";
@@ -93,7 +95,8 @@ function formatBlame(meta?: BlameLine) {
 }
 
 async function loadBlame(path: string) {
-  blameLines.value = await getFileBlame(props.repoPath, path).catch(() => []);
+  const lines = await getFileBlame(props.repoPath, path).catch(() => []);
+  if (path === selected.value) blameLines.value = lines;
 }
 
 function renderHighlight(text: string, path: string) {
@@ -179,19 +182,24 @@ function formatSize(size: number) {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+let treeToken = 0;
+
 async function loadTree(keepExpanded = false) {
+  const token = ++treeToken;
   loadingTree.value = true;
   treeError.value = "";
   const keep = keepExpanded ? new Set(expanded.value) : new Set<string>();
   try {
     const paths = await listWorktree(props.repoPath);
+    if (token !== treeToken) return;
     tree.value = buildTree(paths);
     expanded.value = keep;
   } catch (error) {
+    if (token !== treeToken) return;
     treeError.value = error instanceof Error ? error.message : String(error);
     tree.value = [];
   } finally {
-    loadingTree.value = false;
+    if (token === treeToken) loadingTree.value = false;
   }
 }
 
@@ -212,11 +220,65 @@ function onDraftInput(event: Event) {
   }
 }
 
+let previewToken = 0;
+
+function normRel(path: string) {
+  return path.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").toLowerCase();
+}
+
+function pathHits(changed: string[], current: string) {
+  if (!current) return false;
+  if (!changed.length) return true;
+  const cur = normRel(current);
+  return changed.some((item) => {
+    const rel = normRel(item);
+    if (!rel) return false;
+    return rel === cur || cur.startsWith(`${rel}/`) || rel.startsWith(`${cur}/`);
+  });
+}
+
+function isEditorNoise(path: string) {
+  const name = normRel(path).split("/").pop() ?? "";
+  return (
+    name.endsWith("~") ||
+    name.endsWith(".tmp") ||
+    name.endsWith(".swp") ||
+    name.endsWith(".swx") ||
+    name.startsWith(".#") ||
+    name.endsWith(".bak")
+  );
+}
+
+function treeNeedsRefresh(changed: string[], current: string) {
+  if (!changed.length) return true;
+  const cur = normRel(current);
+  return changed.some((item) => {
+    const rel = normRel(item);
+    if (!rel || rel === cur) return false;
+    if (cur && cur.startsWith(`${rel}/`)) return false;
+    return true;
+  });
+}
+
+function samePreview(result: FilePreview) {
+  const current = preview.value;
+  const content = result.binary ? "" : result.content;
+  return Boolean(
+    current &&
+      current.binary === result.binary &&
+      current.truncated === result.truncated &&
+      current.size === result.size &&
+      draft.value === content &&
+      savedContent.value === content,
+  );
+}
+
 async function openFile(path: string) {
   if (path === selected.value && preview.value) return;
   if (dirty.value && !window.confirm("当前文件有未保存修改，确定丢弃吗？")) {
     return;
   }
+  const token = ++previewToken;
   selected.value = path;
   loadingPreview.value = true;
   previewError.value = "";
@@ -225,26 +287,99 @@ async function openFile(path: string) {
   savedContent.value = "";
   blameLines.value = [];
   try {
-    applyPreview(await previewFile(props.repoPath, path));
+    const result = await previewFile(props.repoPath, path);
+    if (token !== previewToken) return;
+    applyPreview(result);
     void loadBlame(path);
   } catch (error) {
+    if (token !== previewToken) return;
     previewError.value = error instanceof Error ? error.message : String(error);
   } finally {
-    loadingPreview.value = false;
-    await nextTick();
-    writeTextarea(editorEl.value, draft.value);
-    syncEditorView();
+    if (token === previewToken) {
+      loadingPreview.value = false;
+      await nextTick();
+      writeTextarea(editorEl.value, draft.value);
+      syncEditorView();
+    }
   }
+}
+
+async function reloadOpenFile(attempt = 0) {
+  const path = selected.value;
+  if (!path || dirty.value) return;
+  if (saving.value || loadingPreview.value) {
+    scheduleDiskRefresh([path]);
+    return;
+  }
+  const token = ++previewToken;
+  try {
+    const result = await previewFile(props.repoPath, path);
+    if (token !== previewToken || path !== selected.value || dirty.value || saving.value) return;
+    if (samePreview(result)) return;
+    const editor = editorEl.value;
+    const scrollTop = editor?.scrollTop ?? 0;
+    const scrollLeft = editor?.scrollLeft ?? 0;
+    const selStart = editor?.selectionStart ?? 0;
+    const selEnd = editor?.selectionEnd ?? 0;
+    previewError.value = "";
+    applyPreview(result);
+    void loadBlame(path);
+    await nextTick();
+    const next = editorEl.value;
+    if (token !== previewToken || !next) return;
+    next.scrollTop = scrollTop;
+    next.scrollLeft = scrollLeft;
+    const max = next.value.length;
+    next.setSelectionRange(Math.min(selStart, max), Math.min(selEnd, max));
+    syncEditorView();
+  } catch (error) {
+    if (token !== previewToken || path !== selected.value) return;
+    if (attempt < 2) {
+      window.setTimeout(() => {
+        if (previewToken === token && selected.value === path) void reloadOpenFile(attempt + 1);
+      }, 200);
+      return;
+    }
+    previewError.value = error instanceof Error ? error.message : String(error);
+    preview.value = null;
+    draft.value = "";
+    savedContent.value = "";
+    blameLines.value = [];
+    void loadTree(true);
+  }
+}
+
+let diskTimer = 0;
+let pendingPaths: string[] | null = null;
+
+function scheduleDiskRefresh(paths: string[]) {
+  pendingPaths ??= [];
+  pendingPaths.push(...paths);
+  window.clearTimeout(diskTimer);
+  diskTimer = window.setTimeout(() => {
+    const batch = pendingPaths ?? [];
+    pendingPaths = null;
+    const meaningful = batch.filter((item) => !isEditorNoise(item));
+    if (batch.length && !meaningful.length) return;
+    const current = selected.value;
+    const changed = batch.length ? meaningful : batch;
+    if (pathHits(changed, current)) void reloadOpenFile();
+    if (treeNeedsRefresh(changed, current)) void loadTree(true);
+  }, 300);
 }
 
 async function saveFile() {
   if (!editable.value || !selected.value || saving.value) return;
+  const token = ++previewToken;
+  const path = selected.value;
   saving.value = true;
   previewError.value = "";
   try {
-    applyPreview(await saveWorktreeFile(props.repoPath, selected.value, draft.value));
-    void loadBlame(selected.value);
-    notify(`已保存 ${selected.value}`);
+    const result = await saveWorktreeFile(props.repoPath, path, draft.value);
+    if (token !== previewToken) return;
+    applyPreview(result);
+    void loadBlame(path);
+    notify(`已保存 ${path}`);
     emit("changed");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -503,13 +638,25 @@ function requestClose() {
   emit("close");
 }
 
+let stopWatch: UnlistenFn | undefined;
+
 onMounted(() => {
   window.addEventListener("keydown", onGlobalKey, true);
   void loadTree();
+  void listen<{ path: string; kind?: string; paths?: string[] }>("workdir-changed", (event) => {
+    if (!sameRepo(event.payload.path, props.repoPath)) return;
+    const paths = event.payload.paths ?? [];
+    if (event.payload.kind === "git" && !paths.length) return;
+    scheduleDiskRefresh(paths);
+  }).then((unlisten) => {
+    stopWatch = unlisten;
+  });
 });
 
 onUnmounted(() => {
   window.removeEventListener("keydown", onGlobalKey, true);
+  window.clearTimeout(diskTimer);
+  stopWatch?.();
 });
 
 watch(editorEl, (el) => {

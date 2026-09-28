@@ -66,9 +66,13 @@ function addTab(path: string, name = repoNameFromPath(path)) {
 }
 
 async function handleOpen() {
-  const opened = await pickAndOpenRepo();
-  if (!opened) return;
-  addTab(opened.path, opened.name);
+  try {
+    const opened = await pickAndOpenRepo();
+    if (!opened) return;
+    addTab(opened.path, opened.name);
+  } catch (error) {
+    notify(error instanceof Error ? error.message : String(error), "error", 6000);
+  }
 }
 
 function handleOpenPath(path: string) {

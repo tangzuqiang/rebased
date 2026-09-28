@@ -47,6 +47,7 @@ export interface RepoInfo {
   hasRemote: boolean;
   head: string;
   userName: string;
+  isGit: boolean;
 }
 
 export interface GitFile {

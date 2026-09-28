@@ -27,13 +27,27 @@ function withRepo(repo: string | undefined, extra: Record<string, unknown> = {})
   return repo ? { ...extra, repo } : extra;
 }
 
-export async function pickAndOpenRepo(): Promise<RepoInfo | null> {
+function pickedPath(selected: string | string[] | null): string | null {
+  if (!selected) return null;
+  if (Array.isArray(selected)) {
+    return selected[0]?.trim() || null;
+  }
+  const path = selected.trim();
+  return path || null;
+}
+
+export async function pickDirectory(title: string): Promise<string | null> {
   const selected = await open({
     directory: true,
     multiple: false,
-    title: "打开 Git 仓库",
+    title,
   });
-  if (!selected || Array.isArray(selected)) {
+  return pickedPath(selected);
+}
+
+export async function pickAndOpenRepo(): Promise<RepoInfo | null> {
+  const selected = await pickDirectory("打开 Git 仓库");
+  if (!selected) {
     return null;
   }
   return openRepo(selected);

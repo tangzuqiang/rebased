@@ -129,7 +129,8 @@ const repoPath = computed(() => repo.value?.path ?? props.path);
 const selectedCommit = computed(() => commits.value.find((item) => item.hash === selectedHash.value) ?? null);
 const fsDirty = ref(false);
 const watchingPath = ref("");
-const isDirty = computed(() => fsDirty.value || changes.value.length + unversioned.value.length > 0);
+const isGit = computed(() => Boolean(repo.value?.isGit));
+const isDirty = computed(() => isGit.value && (fsDirty.value || changes.value.length + unversioned.value.length > 0));
 
 function emitMeta() {
   if (!repo.value) return;
@@ -163,7 +164,7 @@ function scheduleGitRefresh(kind: "worktree" | "git") {
 async function applyGitRefresh() {
   const kind = pendingWatch;
   pendingWatch = "";
-  if (!kind || !repo.value) return;
+  if (!kind || !repo.value || !repo.value.isGit) return;
   if (busy.value) {
     pendingWatch = kind;
     return;
@@ -213,6 +214,19 @@ async function withBusy<T>(
 
 async function refreshCore() {
   if (!repo.value) return;
+  if (!repo.value.isGit) {
+    changes.value = [];
+    unversioned.value = [];
+    recentBranches.value = [];
+    branches.value = [];
+    commits.value = [];
+    commitFiles.value = [];
+    commitMessage.value = "";
+    selectedHash.value = "";
+    conflictState.value = null;
+    emitMeta();
+    return;
+  }
   const current = repoPath.value;
   const errors: string[] = [];
   const [statusResult, recentResult, repoResult] = await Promise.allSettled([
@@ -245,7 +259,14 @@ async function refreshCore() {
 }
 
 async function refreshLog() {
-  if (!repo.value) return;
+  if (!repo.value?.isGit) {
+    commits.value = [];
+    commitFiles.value = [];
+    commitMessage.value = "";
+    selectedHash.value = "";
+    logLoading.value = false;
+    return;
+  }
   const current = repoPath.value;
   logLoading.value = true;
   try {
@@ -273,7 +294,10 @@ async function refreshLog() {
 }
 
 async function refreshBranches() {
-  if (!repo.value) return;
+  if (!repo.value?.isGit) {
+    branches.value = [];
+    return;
+  }
   const current = repoPath.value;
   const list = await getBranches(current).catch(() => null);
   if (list && current === repoPath.value) {
@@ -312,6 +336,9 @@ async function bootstrap(openConflicts = false) {
   const info = await withBusy("正在打开仓库…", async () => {
     const opened = await openRepo(props.path);
     repo.value = opened;
+    if (!opened.isGit) {
+      showFiles.value = true;
+    }
     await refreshAll();
     if (openConflicts) {
       await syncMergeState(true);
@@ -328,7 +355,7 @@ async function bootstrap(openConflicts = false) {
 }
 
 async function refreshStatus() {
-  if (!repo.value) return;
+  if (!repo.value?.isGit) return;
   const status = await getStatus(repoPath.value).catch(() => null);
   if (!status) return;
   changes.value = status.changes;

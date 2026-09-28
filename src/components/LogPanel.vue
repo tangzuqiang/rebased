@@ -374,6 +374,7 @@ defineExpose({
   <section class="log">
     <div class="log-body">
       <BranchTree
+        v-if="repo.isGit"
         :branches="branches"
         :current-branch="repo.branch"
         @change="emit('refsChange', $event)"
@@ -451,7 +452,8 @@ defineExpose({
             <span class="col-user muted">{{ commit.author }}</span>
             <span class="col-date muted">{{ formatLogDate(commit.timestamp) }}</span>
           </button>
-          <div v-if="logLoading && !commits.length" class="empty-hint">正在加载提交日志…</div>
+          <div v-if="!repo.isGit" class="empty-hint">当前目录未配置 Git，已作为普通文件夹打开</div>
+          <div v-else-if="logLoading && !commits.length" class="empty-hint">正在加载提交日志…</div>
           <div v-else-if="!filtered.length" class="empty-hint">没有匹配的提交</div>
         </div>
       </div>
