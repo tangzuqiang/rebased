@@ -184,6 +184,12 @@ export interface MergeCompare {
   message: string;
 }
 
+export interface PullOutcome {
+  status: "ok" | "diverged";
+  message: string;
+  upstream: string;
+}
+
 export type DiffKind = "same" | "changed" | "added" | "deleted" | "conflict" | "empty";
 
 export interface Diff3Row {

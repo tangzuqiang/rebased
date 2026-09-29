@@ -10,6 +10,8 @@ const props = defineProps<{
   branches: BranchInfo[];
   recent?: string[];
   busy: boolean;
+  initialTheirs?: string;
+  fromPull?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -17,7 +19,7 @@ const emit = defineEmits<{
   merge: [theirs: string];
 }>();
 
-const theirs = ref("");
+const theirs = ref(props.initialTheirs ?? "");
 const canMerge = ref(false);
 const sameHint = ref("");
 const checking = ref(false);
@@ -49,13 +51,16 @@ watch(theirs, async (name) => {
   } finally {
     if (seq === compareSeq) checking.value = false;
   }
-});
+}, { immediate: true });
 </script>
 
 <template>
   <Modal title="合并" tall @close="emit('close')">
     <div class="merge">
-      <p class="muted">没有冲突时会直接完成合并；有冲突时再弹出冲突文件和三端对照。</p>
+      <p v-if="fromPull" class="muted">
+        本地与远程均有新提交，无法直接快进。确认后会将远程分支合并到当前分支；取消不会修改仓库。
+      </p>
+      <p v-else class="muted">确认后开始合并；仅在实际产生冲突时打开冲突处理界面。</p>
       <label>
         当前分支
         <strong>{{ repo.branch }}</strong>

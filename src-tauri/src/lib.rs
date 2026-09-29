@@ -7,7 +7,7 @@ mod watch;
 
 use git::{
     AppState, BlameLine, BranchInfo, FileDiff, FilePreview, GitCommit, GitFile, MergeCompare, MergeFileContent,
-    MergeOutcome, MergePreview, MergeState, RemoteDetail, RepoInfo, StatusPayload,
+    MergeOutcome, MergePreview, MergeState, PullOutcome, RemoteDetail, RepoInfo, StatusPayload,
 };
 use std::path::PathBuf;
 use store::{AppStore, RecentProject, SessionState};
@@ -150,7 +150,7 @@ async fn fetch_remote(state: State<'_, AppState>, repo: Option<String>) -> Resul
 }
 
 #[tauri::command]
-async fn pull_remote(state: State<'_, AppState>, repo: Option<String>) -> Result<String, String> {
+async fn pull_remote(state: State<'_, AppState>, repo: Option<String>) -> Result<PullOutcome, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::pull(&path)).await
 }

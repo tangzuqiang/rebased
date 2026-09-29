@@ -14,6 +14,7 @@ import type {
   MergeOutcome,
   MergePreview,
   MergeState,
+  PullOutcome,
   RecentProject,
   RebaseItem,
   RemoteDetail,
@@ -122,7 +123,7 @@ export function fetchRemote(repo?: string) {
 }
 
 export function pullRemote(repo?: string) {
-  return invoke<string>("pull_remote", withRepo(repo));
+  return invoke<PullOutcome>("pull_remote", withRepo(repo));
 }
 
 export function pushRemote(repo?: string) {
