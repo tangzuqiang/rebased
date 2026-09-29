@@ -54,6 +54,7 @@ import FilePreviewDrawer from "./FilePreviewDrawer.vue";
 import FilesPanel from "./FilesPanel.vue";
 import LogPanel from "./LogPanel.vue";
 import MergeDialog from "./MergeDialog.vue";
+import PullMergeConfirmDialog from "./PullMergeConfirmDialog.vue";
 import MergeEditorPage from "./MergeEditorPage.vue";
 import PushDialog from "./PushDialog.vue";
 import RollbackDialog from "./RollbackDialog.vue";
@@ -99,6 +100,8 @@ const showPush = ref(false);
 const showMerge = ref(false);
 const mergeInitialTheirs = ref("");
 const mergeFromPull = ref(false);
+const showPullMergeConfirm = ref(false);
+const pullMergeUpstream = ref("");
 const showConflicts = ref(false);
 const mergeEditPath = ref("");
 const conflictState = ref<MergeState | null>(null);
@@ -493,13 +496,30 @@ async function handlePull() {
   });
   if (!outcome) return;
   if (outcome.status === "diverged") {
-    mergeInitialTheirs.value = outcome.upstream;
-    mergeFromPull.value = true;
-    showMerge.value = true;
+    pullMergeUpstream.value = outcome.upstream;
+    showPullMergeConfirm.value = true;
     statusText.value = "等待确认合并";
     return;
   }
   notify("拉取完成");
+}
+
+function closePullMergeConfirm() {
+  showPullMergeConfirm.value = false;
+  pullMergeUpstream.value = "";
+  statusText.value = "就绪";
+}
+
+async function confirmPullMerge() {
+  const upstream = pullMergeUpstream.value;
+  if (!upstream) {
+    closePullMergeConfirm();
+    return;
+  }
+  showPullMergeConfirm.value = false;
+  pullMergeUpstream.value = "";
+  statusText.value = "就绪";
+  await handleMerge(upstream);
 }
 
 function openMergeDialog() {
@@ -574,6 +594,12 @@ async function handleBranchAction(payload: { action: BranchMenuAction; branch: B
     return;
   }
   if (payload.action === "update") {
+    const isCurrent =
+      payload.branch.current || payload.branch.name === repo.value?.branch;
+    if (isCurrent) {
+      await handlePull();
+      return;
+    }
     const message = await withBusy(`正在更新 ${payload.branch.name}…`, async () => {
       const result = await updateBranch(repoPath.value, payload.branch.name);
       repo.value = await openRepo(repoPath.value);
@@ -1118,6 +1144,14 @@ onUnmounted(() => {
           <button type="button" class="primary-btn" @click="branchDialog = ''">关闭</button>
         </template>
       </Modal>
+      <PullMergeConfirmDialog
+        v-if="active && showPullMergeConfirm && repo && pullMergeUpstream"
+        :repo="repo"
+        :upstream="pullMergeUpstream"
+        :busy="busy"
+        @close="closePullMergeConfirm"
+        @confirm="confirmPullMerge"
+      />
       <MergeDialog
         v-if="active && showMerge"
         :repo="repo"

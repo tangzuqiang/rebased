@@ -174,10 +174,17 @@ fn exec_git(repo: &Path, args: &[&str]) -> Result<(bool, String, String), String
         .arg("core.quotepath=false")
         .arg("-c")
         .arg("i18n.logOutputEncoding=utf-8")
+        .arg("-c")
+        .arg(format!("core.editor={}", non_interactive_editor()))
+        .arg("-c")
+        .arg(format!("sequence.editor={}", non_interactive_editor()))
         .args(args)
         .current_dir(repo)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_EDITOR", non_interactive_editor())
+        .env("GIT_SEQUENCE_EDITOR", non_interactive_editor())
+        .env("GIT_MERGE_AUTOEDIT", "no")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -1413,10 +1420,17 @@ fn exec_git_env(repo: &Path, args: &[&str], envs: &[(&str, String)]) -> Result<(
         .arg("core.quotepath=false")
         .arg("-c")
         .arg("i18n.logOutputEncoding=utf-8")
+        .arg("-c")
+        .arg(format!("core.editor={}", non_interactive_editor()))
+        .arg("-c")
+        .arg(format!("sequence.editor={}", non_interactive_editor()))
         .args(args)
         .current_dir(repo)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_EDITOR", non_interactive_editor())
+        .env("GIT_SEQUENCE_EDITOR", non_interactive_editor())
+        .env("GIT_MERGE_AUTOEDIT", "no")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (key, value) in envs {
@@ -2161,10 +2175,14 @@ fn write_rebase_editor(todo_path: &Path) -> Result<String, String> {
     }
 }
 
-fn true_editor() -> String {
+fn non_interactive_editor() -> &'static str {
     if cfg!(windows) {
-        "cmd /c exit 0".to_string()
+        "cmd /c exit 0"
     } else {
-        "true".to_string()
+        "true"
     }
+}
+
+fn true_editor() -> String {
+    non_interactive_editor().to_string()
 }

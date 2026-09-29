@@ -176,11 +176,22 @@ fn spawn_updater(package: &PathBuf, silent_args: Option<&str>) -> Result<(), Str
          $log = Join-Path $env:TEMP 'rebased-update.log'\n\
          function Log($m) {{ Add-Content -LiteralPath $log -Value (\"$(Get-Date -Format o) $m\") }}\n\
          Log \"start pid=$oldPid installer=$isInstaller dir=$installDir\"\n\
+         $currentNorm = $null\n\
+         if (Test-Path -LiteralPath $current) {{\n\
+           $currentNorm = (Resolve-Path -LiteralPath $current).Path.ToLowerInvariant()\n\
+         }}\n\
+         $installNorm = $installDir.TrimEnd('\\','/').ToLowerInvariant()\n\
          $deadline = (Get-Date).AddSeconds(90)\n\
-         while (Get-Process -Id $oldPid -ErrorAction SilentlyContinue) {{\n\
-           if ((Get-Date) -gt $deadline) {{ Log 'timeout waiting old process'; break }}\n\
+         while ((Get-Date) -lt $deadline) {{\n\
+           $byPid = Get-Process -Id $oldPid -ErrorAction SilentlyContinue\n\
+           $byPath = @()\n\
+           if ($currentNorm) {{\n\
+             $byPath = @(Get-Process -Name 'rebased','Rebased' -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -and $_.Path.ToLowerInvariant() -eq $currentNorm }})\n\
+           }}\n\
+           if (-not $byPid -and ($byPath.Count -eq 0)) {{ break }}\n\
            Start-Sleep -Milliseconds 300\n\
          }}\n\
+         if ((Get-Date) -ge $deadline) {{ Log 'timeout waiting old process' }}\n\
          Start-Sleep -Milliseconds 800\n\
          if ($isInstaller -and (Test-Path -LiteralPath $package)) {{\n\
            Log \"run installer $package -> $installDir\"\n\
@@ -215,20 +226,39 @@ fn spawn_updater(package: &PathBuf, silent_args: Option<&str>) -> Result<(), Str
            }}\n\
          }}\n\
          Start-Sleep -Milliseconds 800\n\
-         if (Get-Process -Name 'rebased','Rebased' -ErrorAction SilentlyContinue) {{\n\
-           Log 'already running'\n\
-           exit 0\n\
-         }}\n\
          $leaf = Split-Path -Leaf $current\n\
          $candidates = @($current, (Join-Path $installDir $leaf), (Join-Path $installDir 'rebased.exe'), (Join-Path $installDir 'Rebased.exe'))\n\
+         $target = $null\n\
          foreach ($app in $candidates) {{\n\
            if (Test-Path -LiteralPath $app) {{\n\
-             Log \"start $app\"\n\
-             Start-Process -FilePath $app\n\
-             exit 0\n\
+             $target = (Resolve-Path -LiteralPath $app).Path\n\
+             break\n\
            }}\n\
          }}\n\
-         Log 'no exe to start'\n",
+         if (-not $target) {{\n\
+           Log 'no exe to start'\n\
+           exit 1\n\
+         }}\n\
+         $targetNorm = $target.ToLowerInvariant()\n\
+         foreach ($p in @(Get-Process -Name 'rebased','Rebased' -ErrorAction SilentlyContinue)) {{\n\
+           if ($p.Id -eq $oldPid) {{ continue }}\n\
+           $path = $p.Path\n\
+           if (-not $path) {{ continue }}\n\
+           $pn = $path.ToLowerInvariant()\n\
+           if ($pn -eq $targetNorm -or $pn.StartsWith($installNorm + '\\')) {{\n\
+             Log \"stop pid=$($p.Id) path=$path\"\n\
+             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue\n\
+           }}\n\
+         }}\n\
+         Start-Sleep -Milliseconds 600\n\
+         $running = @(Get-Process -Name 'rebased','Rebased' -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -and $_.Path.ToLowerInvariant() -eq $targetNorm }})\n\
+         if ($running.Count -gt 0) {{\n\
+           Log \"target already running pid=$($running.Id -join ',')\"\n\
+           exit 0\n\
+         }}\n\
+         Log \"start $target\"\n\
+         Start-Process -FilePath $target\n\
+         exit 0\n",
         ps_single(&package.to_string_lossy()),
         ps_single(&current.to_string_lossy()),
         ps_single(&install_dir),
@@ -236,7 +266,9 @@ fn spawn_updater(package: &PathBuf, silent_args: Option<&str>) -> Result<(), Str
         ps_single(&nsis_args)
     );
     let ps1 = std::env::temp_dir().join("rebased-update.ps1");
-    std::fs::write(&ps1, script).map_err(|e| format!("无法写入更新脚本：{e}"))?;
+    let mut bytes = vec![0xEF, 0xBB, 0xBF];
+    bytes.extend_from_slice(script.as_bytes());
+    std::fs::write(&ps1, bytes).map_err(|e| format!("无法写入更新脚本：{e}"))?;
     launch_orphaned_powershell(&ps1)?;
     std::thread::sleep(Duration::from_millis(300));
     Ok(())
