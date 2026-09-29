@@ -18,27 +18,31 @@ const toasts = useToasts();
 <style scoped>
 .toasts {
   position: fixed;
-  right: 16px;
-  bottom: 28px;
+  top: 30%;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 2000;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  align-items: center;
+  gap: 10px;
   pointer-events: none;
 }
 
 .toast {
-  min-width: 220px;
-  max-width: min(420px, calc(100vw - 32px));
+  min-width: 280px;
+  max-width: min(520px, calc(100vw - 32px));
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  border-radius: 6px;
+  gap: 10px;
+  padding: 13px 18px;
+  border-radius: 8px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-elevated);
   box-shadow: var(--shadow);
   color: var(--text);
+  font-size: 15px;
+  line-height: 1.5;
 }
 
 .toast.success .dot {
@@ -50,8 +54,8 @@ const toasts = useToasts();
 }
 
 .dot {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   flex: none;
 }
