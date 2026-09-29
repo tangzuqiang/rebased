@@ -730,8 +730,8 @@ async fn check_update() -> Result<updater::UpdateInfo, String> {
 }
 
 #[tauri::command]
-async fn install_update(app: AppHandle) -> Result<String, String> {
-    run_blocking(move || updater::install_update(app)).await
+async fn install_update() -> Result<String, String> {
+    run_blocking(updater::install_update).await
 }
 
 #[tauri::command]

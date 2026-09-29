@@ -59,13 +59,14 @@ async function lookupUpdate() {
 
 async function applyUpdate() {
   installing.value = true;
-    updateHint.value = "正在下载安装包并静默安装，完成后会自动重新打开…";
+  updateHint.value = "正在下载安装包，下载完成后将打开安装向导…";
   updateHintKind.value = "ok";
   try {
     updateHint.value = await installUpdate();
   } catch (error) {
     updateHintKind.value = "err";
     updateHint.value = error instanceof Error ? error.message : String(error);
+  } finally {
     installing.value = false;
   }
 }
@@ -155,7 +156,7 @@ async function test() {
       </section>
       <section v-else-if="section === 'update'" class="panel">
         <h3>关于与更新</h3>
-        <p class="muted">当前版本 {{ version || "未知" }}。更新包从 http://111.230.247.111/rebased/ 下载后静默安装。</p>
+        <p class="muted">当前版本 {{ version || "未知" }}。更新包下载完成后会直接打开安装向导。</p>
         <p v-if="updateInfo?.notes" class="muted">{{ updateInfo.notes }}</p>
         <p v-if="updateHint" class="hint" :class="updateHintKind">{{ updateHint }}</p>
         <div class="actions">
