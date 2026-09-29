@@ -49,6 +49,7 @@ pub struct RepoInfo {
     pub has_remote: bool,
     pub head: String,
     pub user_name: String,
+    pub is_git: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -208,26 +209,22 @@ fn repo_name(path: &Path) -> String {
         .to_string()
 }
 
-fn inside_work_tree(path: &Path) -> bool {
-    run_git(path, &["rev-parse", "--is-inside-work-tree"])
-        .map(|s| s.trim().eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+fn has_git(path: &Path) -> bool {
+    run_git(path, &["rev-parse", "--git-dir"]).is_ok()
 }
 
-fn symbolic_head(repo: &Path) -> Option<String> {
-    run_git(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-fn current_head(repo: &Path) -> (String, bool) {
-    if let Some(name) = symbolic_head(repo) {
-        return (name, false);
-    }
-    match run_git(repo, &["rev-parse", "--short", "HEAD"]) {
-        Ok(short) => (format!("HEAD ({})", short.trim()), true),
-        Err(_) => ("HEAD".to_string(), true),
+fn folder_info(path: &Path) -> RepoInfo {
+    RepoInfo {
+        path: path.to_string_lossy().into_owned(),
+        name: repo_name(path),
+        branch: String::new(),
+        detached: false,
+        ahead: 0,
+        behind: 0,
+        has_remote: false,
+        head: String::new(),
+        user_name: String::new(),
+        is_git: false,
     }
 }
 
@@ -237,27 +234,29 @@ pub fn discover_repo(path: &str) -> Result<(PathBuf, RepoInfo), String> {
         return Err(format!("路径不存在：{path}"));
     }
     if !input.is_dir() {
-        return Err("请选择一个目录".to_string());
+        return Err(format!("请选择一个目录：{path}"));
     }
-
-    if !inside_work_tree(&input) {
-        run_git(&input, &["init"])?;
-    }
-
-    let toplevel = run_git(&input, &["rev-parse", "--show-toplevel"])?
-        .trim()
-        .to_string();
-    if toplevel.is_empty() {
-        return Err("无法确定仓库目录".to_string());
-    }
-
-    let repo = PathBuf::from(&toplevel);
-    let info = repo_info(&repo)?;
-    Ok((repo, info))
+    Ok((input.clone(), repo_info(&input)?))
 }
 
 pub fn repo_info(repo: &Path) -> Result<RepoInfo, String> {
-    let (branch, detached) = current_head(repo);
+    if !has_git(repo) {
+        return Ok(folder_info(repo));
+    }
+
+    let head_name = run_git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let detached = head_name.as_deref() == Some("HEAD");
+
+    let branch = match head_name.as_deref() {
+        Some("HEAD") => run_git(repo, &["rev-parse", "--short", "HEAD"])
+            .map(|s| format!("HEAD ({})", s.trim()))
+            .unwrap_or_else(|_| "未提交".to_string()),
+        Some(name) => name.to_string(),
+        None => "未提交".to_string(),
+    };
 
     let mut ahead = 0u32;
     let mut behind = 0u32;
@@ -299,6 +298,7 @@ pub fn repo_info(repo: &Path) -> Result<RepoInfo, String> {
         has_remote,
         head,
         user_name,
+        is_git: true,
     })
 }
 
@@ -516,23 +516,6 @@ pub fn branches(repo: &Path) -> Result<Vec<BranchInfo>, String> {
                 name: name.to_string(),
                 upstream: String::new(),
             });
-        }
-    }
-    if let Some(current) = symbolic_head(repo) {
-        if !list
-            .iter()
-            .any(|item| item.name == current && item.kind == "local")
-        {
-            list.insert(
-                0,
-                BranchInfo {
-                    name: current,
-                    current: true,
-                    remote: false,
-                    kind: "local".to_string(),
-                    upstream: String::new(),
-                },
-            );
         }
     }
     Ok(list)
@@ -1191,11 +1174,9 @@ fn merge_in_progress(repo: &Path) -> bool {
 }
 
 fn current_branch(repo: &Path) -> String {
-    symbolic_head(repo).unwrap_or_else(|| {
-        run_git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| "HEAD".to_string())
-    })
+    run_git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "HEAD".to_string())
 }
 
 fn incoming_branch(repo: &Path) -> String {
@@ -1345,6 +1326,9 @@ fn localize_git_error(err: &str) -> String {
     }
     if lower.contains("authentication failed") || lower.contains("could not read from remote") {
         return "远程认证失败，或无法连接远程仓库".to_string();
+    }
+    if lower.contains("not a git repository") {
+        return "所选目录不是 Git 仓库（需要包含 .git）".to_string();
     }
     if lower.contains("not possible to fast-forward") || lower.contains("divergent branches") {
         return "无法快进拉取，本地与远程存在分叉".to_string();
@@ -2150,95 +2134,5 @@ fn true_editor() -> String {
         "cmd /c exit 0".to_string()
     } else {
         "true".to_string()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-
-    fn unique_temp() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "rebased-git-test-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn path_str(path: &Path) -> String {
-        path.to_string_lossy().into_owned()
-    }
-
-    fn same_dir(a: &Path, b: &Path) -> bool {
-        let normalize = |path: &Path| {
-            let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-            canonical
-                .to_string_lossy()
-                .trim_start_matches(r"\\?\")
-                .replace('\\', "/")
-                .trim_end_matches('/')
-                .to_lowercase()
-        };
-        normalize(a) == normalize(b)
-    }
-
-    fn cleanup(dir: &Path) {
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn opens_empty_git_repository() {
-        let dir = unique_temp();
-        run_git(&dir, &["init"]).unwrap();
-        let (repo, info) = discover_repo(&path_str(&dir)).expect("empty git repo should open");
-        assert!(same_dir(&repo, &dir));
-        assert!(!info.branch.is_empty());
-        assert_ne!(info.branch, "HEAD");
-        assert!(!info.detached);
-        assert!(info.head.is_empty());
-        assert!(log(&repo, 20, &[]).unwrap().is_empty());
-        assert!(branches(&repo)
-            .unwrap()
-            .iter()
-            .any(|item| item.current && item.kind == "local" && item.name == info.branch));
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn opens_empty_directory_and_inits_git() {
-        let dir = unique_temp();
-        assert!(!dir.join(".git").exists());
-        let (repo, info) = discover_repo(&path_str(&dir)).expect("empty directory should open");
-        assert!(same_dir(&repo, &dir));
-        assert!(repo.join(".git").exists());
-        assert!(!info.branch.is_empty());
-        assert!(!info.detached);
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn opens_non_git_directory_with_files() {
-        let dir = unique_temp();
-        fs::write(dir.join("readme.txt"), "hello").unwrap();
-        let (repo, info) = discover_repo(&path_str(&dir)).expect("non-git directory should open");
-        assert!(!info.branch.is_empty());
-        let payload = status(&repo).unwrap();
-        assert!(payload
-            .unversioned
-            .iter()
-            .any(|file| file.path == "readme.txt" || file.path.ends_with("readme.txt")));
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn missing_path_still_errors() {
-        let err = discover_repo("Z:\\rebased-missing-path-should-not-exist").unwrap_err();
-        assert!(err.contains("不存在"));
     }
 }

@@ -47,6 +47,7 @@ export interface RepoInfo {
   hasRemote: boolean;
   head: string;
   userName: string;
+  isGit: boolean;
 }
 
 export interface GitFile {
@@ -192,6 +193,8 @@ export interface Diff3Row {
   oursKind: DiffKind;
   baseKind: DiffKind;
   theirsKind: DiffKind;
+  /** 同一处冲突的每一行，包含一侧较长时多出来的行。 */
+  forceConflict?: boolean;
   oursBlame?: BlameLine;
   baseBlame?: BlameLine;
   theirsBlame?: BlameLine;

@@ -120,9 +120,16 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branc
       </PopupMenu>
 
       <span class="sep" />
-      <span v-if="dirty" class="dirty" title="工作区有未提交变更">*</span>
+      <span v-if="repo.isGit && dirty" class="dirty" title="工作区有未提交变更">*</span>
 
-      <button ref="branchAnchor" type="button" class="combo" :class="{ busy }" @click="toggleBranch">
+      <button
+        v-if="repo.isGit"
+        ref="branchAnchor"
+        type="button"
+        class="combo"
+        :class="{ busy }"
+        @click="toggleBranch"
+      >
         <span v-if="busy" class="btn-spinner" />
         <Icons v-else name="branch" :size="12" />
         <span>{{ busy ? (busyText || "Git 操作中…") : repo.branch }}</span>
@@ -159,7 +166,7 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branc
       </PopupMenu>
 
       <button
-        v-if="merging"
+        v-if="repo.isGit && merging"
         type="button"
         class="conflict-btn"
         title="当前合并存在未解决冲突"
@@ -168,7 +175,7 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branc
         冲突…
       </button>
 
-      <span v-if="repo.ahead || repo.behind" class="sync muted">
+      <span v-if="repo.isGit && (repo.ahead || repo.behind)" class="sync muted">
         <template v-if="repo.ahead">↑{{ repo.ahead }}</template>
         <template v-if="repo.behind"> ↓{{ repo.behind }}</template>
       </span>

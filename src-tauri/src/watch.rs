@@ -73,11 +73,43 @@ fn interesting(kind: &EventKind) -> bool {
     )
 }
 
+fn normalize_full(path: &str) -> String {
+    let stripped = path
+        .strip_prefix(r"\\?\")
+        .or_else(|| path.strip_prefix("//?/"))
+        .unwrap_or(path);
+    stripped.replace('\\', "/")
+}
+
+fn rel_under(root: &str, path: &Path) -> Option<String> {
+    let root = normalize_full(root).trim_end_matches('/').to_string();
+    let full = normalize_full(&path.to_string_lossy()).trim_end_matches('/').to_string();
+    if root.is_empty() || full.len() < root.len() {
+        return None;
+    }
+    if !full[..root.len()].eq_ignore_ascii_case(&root) {
+        return None;
+    }
+    if full.len() == root.len() {
+        return None;
+    }
+    if full.as_bytes().get(root.len()) != Some(&b'/') {
+        return None;
+    }
+    let rel = full[root.len() + 1..].trim_matches('/');
+    if rel.is_empty() {
+        None
+    } else {
+        Some(rel.to_string())
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkdirChanged {
     path: String,
     kind: &'static str,
+    paths: Vec<String>,
 }
 
 pub fn watch_repo(hub: &WatchHub, app: AppHandle, path: String) -> Result<(), String> {
@@ -94,18 +126,37 @@ pub fn watch_repo(hub: &WatchHub, app: AppHandle, path: String) -> Result<(), St
         if !interesting(&event.kind) {
             return;
         }
-        let mut kind = None;
+        let mut saw_git = false;
+        let mut saw_worktree = false;
+        let mut overflow = false;
+        let mut paths = Vec::new();
         for item in &event.paths {
             match classify(item) {
-                Some("git") => {
-                    kind = Some("git");
-                    break;
+                Some("git") => saw_git = true,
+                Some("worktree") => {
+                    saw_worktree = true;
+                    if overflow {
+                        continue;
+                    }
+                    if paths.len() >= 64 {
+                        overflow = true;
+                        paths.clear();
+                        continue;
+                    }
+                    if let Some(rel) = rel_under(&emit_path, item) {
+                        if !paths.iter().any(|existing| existing == &rel) {
+                            paths.push(rel);
+                        }
+                    }
                 }
-                Some(value) => kind = Some(value),
-                None => {}
+                _ => {}
             }
         }
-        let Some(kind) = kind else {
+        let kind = if saw_git {
+            "git"
+        } else if saw_worktree {
+            "worktree"
+        } else {
             return;
         };
         let _ = app.emit(
@@ -113,6 +164,7 @@ pub fn watch_repo(hub: &WatchHub, app: AppHandle, path: String) -> Result<(), St
             WorkdirChanged {
                 path: emit_path.clone(),
                 kind,
+                paths,
             },
         );
     })
@@ -131,4 +183,27 @@ pub fn unwatch_repo(hub: &WatchHub, path: String) -> Result<(), String> {
         .map_err(|_| "状态锁失败".to_string())?
         .remove(&key);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rel_under;
+    use std::path::Path;
+
+    #[test]
+    fn relative_path_strips_repo_root() {
+        let rel = rel_under(r"D:\Repo", Path::new(r"\\?\D:\Repo\src\App.vue")).unwrap();
+        assert_eq!(rel, "src/App.vue");
+    }
+
+    #[test]
+    fn relative_path_ignores_ascii_case() {
+        let rel = rel_under("D:/repo", Path::new("d:/Repo/README.md")).unwrap();
+        assert_eq!(rel, "README.md");
+    }
+
+    #[test]
+    fn relative_path_rejects_sibling_prefix() {
+        assert!(rel_under(r"D:\Repo", Path::new(r"D:\Repo2\file.txt")).is_none());
+    }
 }

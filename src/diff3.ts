@@ -61,6 +61,44 @@ function takeBlame(list: BlameLine[] | undefined, index: { value: number }, kind
   return item;
 }
 
+type AnnOp = Op & { baseIndex: number };
+
+function annotate(ops: Op[]): AnnOp[] {
+  let baseIndex = 0;
+  return ops.map((op) => {
+    if (op.type === "ins") return { ...op, baseIndex };
+    const annotated = { ...op, baseIndex };
+    baseIndex += 1;
+    return annotated;
+  });
+}
+
+function inRegion(op: AnnOp, prev: number, next: number) {
+  if (op.type === "ins") return op.baseIndex > prev && op.baseIndex <= next;
+  return op.baseIndex > prev && op.baseIndex < next;
+}
+
+function sideLines(ops: AnnOp[]) {
+  const lines: string[] = [];
+  for (const op of ops) {
+    if (op.type === "ins" || op.type === "eq") lines.push(op.b ?? op.a ?? "");
+  }
+  return lines;
+}
+
+function baseLines(ops: AnnOp[]) {
+  const lines: string[] = [];
+  for (const op of ops) {
+    if (op.type === "eq" || op.type === "del") lines.push(op.a ?? "");
+  }
+  return lines;
+}
+
+function sameLines(a: string[], b: string[], ignoreWhitespace: boolean) {
+  if (a.length !== b.length) return false;
+  return a.every((line, index) => normalize(line, ignoreWhitespace) === normalize(b[index] ?? "", ignoreWhitespace));
+}
+
 export function alignDiff3(
   oursText: string,
   baseText: string,
@@ -71,11 +109,9 @@ export function alignDiff3(
   const ours = splitLines(oursText);
   const base = splitLines(baseText);
   const theirs = splitLines(theirsText);
-  const left = lcsOps(base, ours, ignoreWhitespace);
-  const right = lcsOps(base, theirs, ignoreWhitespace);
+  const left = annotate(lcsOps(base, ours, ignoreWhitespace));
+  const right = annotate(lcsOps(base, theirs, ignoreWhitespace));
   const rows: Diff3Row[] = [];
-  let li = 0;
-  let ri = 0;
   const oursIndex = { value: 0 };
   const baseIndex = { value: 0 };
   const theirsIndex = { value: 0 };
@@ -87,8 +123,10 @@ export function alignDiff3(
     oursKind: DiffKind,
     baseKind: DiffKind,
     theirsKind: DiffKind,
+    forceConflict = false,
   ) => {
-    const conflict =
+    const autoConflict =
+      !forceConflict &&
       oursKind !== "same" &&
       oursKind !== "empty" &&
       theirsKind !== "same" &&
@@ -98,76 +136,176 @@ export function alignDiff3(
       ours: oursLine,
       base: baseLine,
       theirs: theirsLine,
-      oursKind: conflict ? "conflict" : oursKind,
-      baseKind: conflict ? "conflict" : baseKind,
-      theirsKind: conflict ? "conflict" : theirsKind,
+      oursKind: autoConflict ? "conflict" : oursKind,
+      baseKind: autoConflict ? "conflict" : baseKind,
+      theirsKind: autoConflict ? "conflict" : theirsKind,
+      forceConflict: forceConflict || autoConflict,
       oursBlame: takeBlame(options.blame?.ours, oursIndex, oursKind),
       baseBlame: takeBlame(options.blame?.base, baseIndex, baseKind),
       theirsBlame: takeBlame(options.blame?.theirs, theirsIndex, theirsKind),
     });
   };
 
-  while (li < left.length || ri < right.length) {
-    const l = left[li];
-    const r = right[ri];
-    if (l?.type === "ins" && r?.type === "ins") {
-      pushRow(l.b ?? "", "", r.b ?? "", "added", "empty", "added");
-      li += 1;
-      ri += 1;
-      continue;
+  const zip = (opsL: AnnOp[], opsR: AnnOp[]) => {
+    let li = 0;
+    let ri = 0;
+    while (li < opsL.length || ri < opsR.length) {
+      const l = opsL[li];
+      const r = opsR[ri];
+      if (l?.type === "ins" && r?.type === "ins") {
+        pushRow(l.b ?? "", "", r.b ?? "", "added", "empty", "added");
+        li += 1;
+        ri += 1;
+        continue;
+      }
+      if (l?.type === "ins") {
+        pushRow(l.b ?? "", "", "", "added", "empty", "empty");
+        li += 1;
+        continue;
+      }
+      if (r?.type === "ins") {
+        pushRow("", "", r.b ?? "", "empty", "empty", "added");
+        ri += 1;
+        continue;
+      }
+      if (l?.type === "del" && r?.type === "del") {
+        pushRow("", l.a ?? "", "", "deleted", "same", "deleted");
+        li += 1;
+        ri += 1;
+        continue;
+      }
+      if (l?.type === "del" && r?.type === "eq") {
+        pushRow("", l.a ?? "", r.b ?? "", "deleted", "same", "same");
+        li += 1;
+        ri += 1;
+        continue;
+      }
+      if (r?.type === "del" && l?.type === "eq") {
+        pushRow(l.b ?? "", r.a ?? "", "", "same", "same", "deleted");
+        li += 1;
+        ri += 1;
+        continue;
+      }
+      if (l?.type === "eq" && r?.type === "eq") {
+        const changedOurs = !ignoreWhitespace && l.a !== l.b;
+        const changedTheirs = !ignoreWhitespace && r.a !== r.b;
+        pushRow(
+          l.b ?? "",
+          l.a ?? "",
+          r.b ?? "",
+          changedOurs ? "changed" : "same",
+          "same",
+          changedTheirs ? "changed" : "same",
+        );
+        li += 1;
+        ri += 1;
+        continue;
+      }
+      if (l) {
+        pushRow(l.b ?? l.a ?? "", l.a ?? "", "", l.type === "del" ? "deleted" : "same", "same", "empty");
+        li += 1;
+        continue;
+      }
+      if (r) {
+        pushRow("", r.a ?? "", r.b ?? r.a ?? "", "empty", "same", r.type === "del" ? "deleted" : "same");
+        ri += 1;
+      }
     }
-    if (l?.type === "ins") {
-      pushRow(l.b ?? "", "", "", "added", "empty", "empty");
-      li += 1;
-      continue;
+  };
+
+  const emitStable = (l: AnnOp, r: AnnOp) => {
+    const changedOurs = !ignoreWhitespace && l.a !== l.b;
+    const changedTheirs = !ignoreWhitespace && r.a !== r.b;
+    pushRow(
+      l.b ?? "",
+      l.a ?? "",
+      r.b ?? "",
+      changedOurs ? "changed" : "same",
+      "same",
+      changedTheirs ? "changed" : "same",
+    );
+  };
+
+  const emitAgreed = (ops: AnnOp[]) => {
+    for (const op of ops) {
+      if (op.type === "del") {
+        baseIndex.value += 1;
+        continue;
+      }
+      const text = op.b ?? op.a ?? "";
+      pushRow(text, op.type === "eq" ? (op.a ?? "") : "", text, "same", op.type === "eq" ? "same" : "empty", "same");
     }
-    if (r?.type === "ins") {
-      pushRow("", "", r.b ?? "", "empty", "empty", "added");
-      ri += 1;
-      continue;
-    }
-    if (l?.type === "del" && r?.type === "del") {
-      pushRow("", l.a ?? "", "", "deleted", "same", "deleted");
-      li += 1;
-      ri += 1;
-      continue;
-    }
-    if (l?.type === "del" && r?.type === "eq") {
-      pushRow("", l.a ?? "", r.b ?? "", "deleted", "same", "same");
-      li += 1;
-      ri += 1;
-      continue;
-    }
-    if (r?.type === "del" && l?.type === "eq") {
-      pushRow(l.b ?? "", r.a ?? "", "", "same", "same", "deleted");
-      li += 1;
-      ri += 1;
-      continue;
-    }
-    if (l?.type === "eq" && r?.type === "eq") {
-      const changedOurs = !ignoreWhitespace && l.a !== l.b;
-      const changedTheirs = !ignoreWhitespace && r.a !== r.b;
+  };
+
+  const emitConflict = (leftOps: AnnOp[], rightOps: AnnOp[]) => {
+    const oursLines = sideLines(leftOps);
+    const theirsLines = sideLines(rightOps);
+    const ancestor = baseLines(leftOps);
+    const count = Math.max(oursLines.length, theirsLines.length, ancestor.length);
+    for (let index = 0; index < count; index += 1) {
+      const hasOurs = index < oursLines.length;
+      const hasTheirs = index < theirsLines.length;
+      const hasBase = index < ancestor.length;
       pushRow(
-        l.b ?? "",
-        l.a ?? "",
-        r.b ?? "",
-        changedOurs ? "changed" : "same",
-        "same",
-        changedTheirs ? "changed" : "same",
+        hasOurs ? oursLines[index] : "",
+        hasBase ? ancestor[index] : "",
+        hasTheirs ? theirsLines[index] : "",
+        hasOurs ? "conflict" : "empty",
+        hasBase ? "same" : "empty",
+        hasTheirs ? "conflict" : "empty",
+        true,
       );
-      li += 1;
-      ri += 1;
-      continue;
     }
-    if (l) {
-      pushRow(l.b ?? l.a ?? "", l.a ?? "", "", l.type === "del" ? "deleted" : "same", "same", "empty");
-      li += 1;
-      continue;
+  };
+
+  const emitRegion = (leftOps: AnnOp[], rightOps: AnnOp[]) => {
+    const leftChanged = leftOps.some((op) => op.type !== "eq");
+    const rightChanged = rightOps.some((op) => op.type !== "eq");
+    if (!leftChanged && !rightChanged) return;
+    if (leftChanged && rightChanged) {
+      const oursResult = sideLines(leftOps);
+      const theirsResult = sideLines(rightOps);
+      if (sameLines(oursResult, theirsResult, ignoreWhitespace)) emitAgreed(leftOps);
+      else emitConflict(leftOps, rightOps);
+      return;
     }
-    if (r) {
-      pushRow("", r.a ?? "", r.b ?? r.a ?? "", "empty", "same", r.type === "del" ? "deleted" : "same");
-      ri += 1;
-    }
+    zip(leftOps, rightOps);
+  };
+
+  const leftEq = new Set(left.filter((op) => op.type === "eq").map((op) => op.baseIndex));
+  const rightEq = new Set(right.filter((op) => op.type === "eq").map((op) => op.baseIndex));
+  const sync: number[] = [];
+  for (let index = 0; index < base.length; index += 1) {
+    if (leftEq.has(index) && rightEq.has(index)) sync.push(index);
   }
+  sync.push(base.length);
+
+  let prev = -1;
+  let li = 0;
+  let ri = 0;
+  for (const next of sync) {
+    const leftRegion: AnnOp[] = [];
+    while (li < left.length && inRegion(left[li], prev, next)) {
+      leftRegion.push(left[li]);
+      li += 1;
+    }
+    const rightRegion: AnnOp[] = [];
+    while (ri < right.length && inRegion(right[ri], prev, next)) {
+      rightRegion.push(right[ri]);
+      ri += 1;
+    }
+    emitRegion(leftRegion, rightRegion);
+    if (next < base.length) {
+      const l = left[li];
+      const r = right[ri];
+      if (l?.type === "eq" && l.baseIndex === next && r?.type === "eq" && r.baseIndex === next) {
+        emitStable(l, r);
+        li += 1;
+        ri += 1;
+      }
+    }
+    prev = next;
+  }
+  if (li < left.length || ri < right.length) zip(left.slice(li), right.slice(ri));
   return rows;
 }

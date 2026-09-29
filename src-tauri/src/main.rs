@@ -9,17 +9,29 @@ fn main() {
 }
 
 fn apply_silent_self_install() -> bool {
-    let silent = std::env::args().any(|item| item.eq_ignore_ascii_case("/s"));
+    let args: Vec<String> = std::env::args().collect();
+    let silent = args.iter().any(|item| item.eq_ignore_ascii_case("/s"));
     if !silent {
         return false;
     }
     let Ok(src) = std::env::current_exe() else {
         return false;
     };
-    let Some(base) = std::env::var_os("LOCALAPPDATA") else {
+    let dest_dir = args
+        .iter()
+        .find_map(|item| {
+            item.strip_prefix("/D=")
+                .or_else(|| item.strip_prefix("/d="))
+                .filter(|path| !path.is_empty())
+                .map(std::path::PathBuf::from)
+        })
+        .or_else(|| {
+            std::env::var_os("LOCALAPPDATA")
+                .map(|base| std::path::PathBuf::from(base).join("Rebased"))
+        });
+    let Some(dest_dir) = dest_dir else {
         return false;
     };
-    let dest_dir = std::path::PathBuf::from(base).join("Rebased");
     if std::fs::create_dir_all(&dest_dir).is_err() {
         return false;
     }
