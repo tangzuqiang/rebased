@@ -666,8 +666,40 @@ pub fn fetch(repo: &Path) -> Result<String, String> {
     run_git(repo, &["fetch", "--all", "--prune"])
 }
 
-pub fn pull(repo: &Path) -> Result<String, String> {
-    run_git(repo, &["pull", "--ff-only"])
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullOutcome {
+    pub status: String,
+    pub message: String,
+    pub upstream: String,
+}
+
+pub fn pull(repo: &Path) -> Result<PullOutcome, String> {
+    let (ok, stdout, stderr) = exec_git(repo, &["pull", "--ff-only"])?;
+    let combined = format!("{stdout}\n{stderr}");
+    if ok {
+        return Ok(PullOutcome {
+            status: "ok".to_string(),
+            message: combined.trim().to_string(),
+            upstream: String::new(),
+        });
+    }
+
+    let lower = combined.to_ascii_lowercase();
+    if lower.contains("not possible to fast-forward") || lower.contains("divergent branches") {
+        let branch = current_branch(repo);
+        let upstream = branch_upstream(repo, &branch);
+        if upstream.is_empty() {
+            return Err("当前分支没有设置上游，无法合并远程更新".to_string());
+        }
+        return Ok(PullOutcome {
+            status: "diverged".to_string(),
+            message: "本地与远程均有新提交，需要确认后合并".to_string(),
+            upstream,
+        });
+    }
+
+    Err(localize_git_error(combined.trim()))
 }
 
 pub fn push(repo: &Path) -> Result<String, String> {

@@ -97,6 +97,8 @@ const showCommit = ref(false);
 const showRollback = ref(false);
 const showPush = ref(false);
 const showMerge = ref(false);
+const mergeInitialTheirs = ref("");
+const mergeFromPull = ref(false);
 const showConflicts = ref(false);
 const mergeEditPath = ref("");
 const conflictState = ref<MergeState | null>(null);
@@ -483,13 +485,34 @@ async function handleFetch() {
 }
 
 async function handlePull() {
-  const ok = await withBusy("正在拉取…", async () => {
-    await pullRemote(repoPath.value);
+  const outcome = await withBusy("正在拉取…", async () => {
+    const result = await pullRemote(repoPath.value);
     repo.value = await openRepo(repoPath.value);
     await refreshAll();
-    return true;
+    return result;
   });
-  if (ok) notify("拉取完成");
+  if (!outcome) return;
+  if (outcome.status === "diverged") {
+    mergeInitialTheirs.value = outcome.upstream;
+    mergeFromPull.value = true;
+    showMerge.value = true;
+    statusText.value = "等待确认合并";
+    return;
+  }
+  notify("拉取完成");
+}
+
+function openMergeDialog() {
+  mergeInitialTheirs.value = "";
+  mergeFromPull.value = false;
+  showMerge.value = true;
+}
+
+function closeMergeDialog() {
+  showMerge.value = false;
+  mergeInitialTheirs.value = "";
+  mergeFromPull.value = false;
+  statusText.value = "就绪";
 }
 
 function openNewBranchFromCurrent() {
@@ -679,7 +702,7 @@ async function handleMerge(theirs: string) {
     repo.value = await openRepo(repoPath.value);
     selectedHash.value = "";
     await refreshAll();
-    showMerge.value = false;
+    closeMergeDialog();
     if (result.status === "conflicts") {
       conflictState.value = result.state;
       showConflicts.value = true;
@@ -978,7 +1001,7 @@ onUnmounted(() => {
         @pull="handlePull"
         @commit="openCommit()"
         @push="showPush = true"
-        @merge="showMerge = true"
+        @merge="openMergeDialog"
         @rollback="openRollback()"
         @new-branch="openNewBranchFromCurrent"
         @conflicts="openConflicts"
@@ -1101,7 +1124,9 @@ onUnmounted(() => {
         :branches="branches"
         :recent="recentBranches"
         :busy="busy"
-        @close="showMerge = false"
+        :initial-theirs="mergeInitialTheirs"
+        :from-pull="mergeFromPull"
+        @close="closeMergeDialog"
         @merge="handleMerge"
       />
       <ConflictsDialog
