@@ -17,7 +17,6 @@ const props = defineProps<{
   terminalOpen?: boolean;
   busyText?: string;
   recentBranches?: string[];
-  version?: string;
 }>();
 
 const emit = defineEmits<{
@@ -97,8 +96,6 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branc
       >
         <Icons name="terminal" />
       </button>
-      <img src="/rebased.svg" width="18" height="18" alt="" />
-      <span v-if="version" class="app-ver" :title="`Rebased ${version}`">{{ version }}</span>
       <button ref="repoAnchor" type="button" class="combo" @click="toggleRepo">
         <span>{{ repo.name }}</span>
         <Icons name="chevron" :size="12" />
@@ -239,12 +236,6 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branc
   height: 16px;
   background: var(--border-soft);
   margin: 0 2px;
-}
-
-.app-ver {
-  color: var(--text-muted);
-  font-size: 11px;
-  line-height: 1;
 }
 
 .dirty {

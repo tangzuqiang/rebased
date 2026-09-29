@@ -137,38 +137,45 @@ fn ps_single(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-fn install_arg_list(silent_args: Option<&str>) -> String {
+fn nsis_arguments(silent_args: Option<&str>, install_dir: &str) -> String {
     let mut args: Vec<String> = silent_args
-        .unwrap_or("/S /R")
+        .unwrap_or("/S")
         .split_whitespace()
+        .filter(|item| {
+            let lower = item.to_ascii_lowercase();
+            !lower.starts_with("/d=") && lower != "/r"
+        })
         .map(|item| item.to_string())
         .collect();
-    if args.is_empty() {
-        args.push("/S".to_string());
+    if !args.iter().any(|item| item.eq_ignore_ascii_case("/S")) {
+        args.insert(0, "/S".to_string());
     }
-    if !args.iter().any(|item| item.eq_ignore_ascii_case("/R")) {
-        args.push("/R".to_string());
-    }
-    args.iter()
-        .map(|item| ps_single(item))
-        .collect::<Vec<_>>()
-        .join(",")
+    let dir = install_dir.trim_end_matches(['\\', '/']);
+    args.push(format!("/D={dir}"));
+    args.join(" ")
 }
 
 fn spawn_updater(package: &PathBuf, silent_args: Option<&str>) -> Result<(), String> {
     let current = std::env::current_exe().map_err(|e| format!("无法定位当前程序：{e}"))?;
+    let install_dir = current
+        .parent()
+        .map(|path| path.to_string_lossy().to_string())
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| "无法确定安装目录".to_string())?;
     let pid = std::process::id();
     let installer = looks_like_installer(package);
+    let nsis_args = nsis_arguments(silent_args, &install_dir);
     let script = format!(
         "$ErrorActionPreference = 'Continue'\n\
          $oldPid = {pid}\n\
          $package = {}\n\
          $current = {}\n\
+         $installDir = {}\n\
          $isInstaller = {}\n\
-         $installArgs = @({})\n\
+         $nsisArgs = {}\n\
          $log = Join-Path $env:TEMP 'rebased-update.log'\n\
          function Log($m) {{ Add-Content -LiteralPath $log -Value (\"$(Get-Date -Format o) $m\") }}\n\
-         Log \"start pid=$oldPid installer=$isInstaller\"\n\
+         Log \"start pid=$oldPid installer=$isInstaller dir=$installDir\"\n\
          $deadline = (Get-Date).AddSeconds(90)\n\
          while (Get-Process -Id $oldPid -ErrorAction SilentlyContinue) {{\n\
            if ((Get-Date) -gt $deadline) {{ Log 'timeout waiting old process'; break }}\n\
@@ -176,22 +183,35 @@ fn spawn_updater(package: &PathBuf, silent_args: Option<&str>) -> Result<(), Str
          }}\n\
          Start-Sleep -Milliseconds 800\n\
          if ($isInstaller -and (Test-Path -LiteralPath $package)) {{\n\
-           Log \"run installer $package\"\n\
+           Log \"run installer $package -> $installDir\"\n\
+           $psi = New-Object System.Diagnostics.ProcessStartInfo\n\
+           $psi.UseShellExecute = $false\n\
+           $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden\n\
            if ([IO.Path]::GetExtension($package) -ieq '.msi') {{\n\
-             $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', $package, '/qn', '/norestart') -PassThru -WindowStyle Hidden\n\
+             $q = [char]34\n\
+             $psi.FileName = 'msiexec.exe'\n\
+             $psi.Arguments = '/i ' + $q + $package + $q + ' /qn /norestart INSTALLDIR=' + $q + $installDir + $q\n\
            }} else {{\n\
-             $p = Start-Process -FilePath $package -ArgumentList $installArgs -PassThru -WindowStyle Hidden\n\
+             $psi.FileName = $package\n\
+             $psi.Arguments = $nsisArgs\n\
            }}\n\
-           if ($p) {{ Wait-Process -Id $p.Id -Timeout 180 -ErrorAction SilentlyContinue }}\n\
+           $proc = [System.Diagnostics.Process]::Start($psi)\n\
+           if ($proc) {{\n\
+             [void]$proc.WaitForExit(180000)\n\
+             Log \"installer exit $($proc.ExitCode)\"\n\
+           }} else {{\n\
+             Log 'installer did not start'\n\
+           }}\n\
          }} elseif (Test-Path -LiteralPath $package) {{\n\
-           $targets = @((Join-Path $env:LOCALAPPDATA 'Rebased\\rebased.exe'), $current)\n\
-           foreach ($t in $targets) {{\n\
+           foreach ($i in 1..8) {{\n\
              try {{\n\
-               New-Item -ItemType Directory -Force -Path (Split-Path $t) | Out-Null\n\
-               Copy-Item -LiteralPath $package -Destination $t -Force\n\
-               Log \"copied to $t\"\n\
+               Copy-Item -LiteralPath $package -Destination $current -Force\n\
+               Log \"copied to $current\"\n\
                break\n\
-             }} catch {{ Log \"copy failed $t $($_.Exception.Message)\" }}\n\
+             }} catch {{\n\
+               Log \"copy failed $current $($_.Exception.Message)\"\n\
+               Start-Sleep -Milliseconds 400\n\
+             }}\n\
            }}\n\
          }}\n\
          Start-Sleep -Milliseconds 800\n\
@@ -199,11 +219,8 @@ fn spawn_updater(package: &PathBuf, silent_args: Option<&str>) -> Result<(), Str
            Log 'already running'\n\
            exit 0\n\
          }}\n\
-         $candidates = @(\n\
-           (Join-Path $env:LOCALAPPDATA 'Rebased\\rebased.exe'),\n\
-           (Join-Path $env:LOCALAPPDATA 'Rebased\\Rebased.exe'),\n\
-           $current\n\
-         )\n\
+         $leaf = Split-Path -Leaf $current\n\
+         $candidates = @($current, (Join-Path $installDir $leaf), (Join-Path $installDir 'rebased.exe'), (Join-Path $installDir 'Rebased.exe'))\n\
          foreach ($app in $candidates) {{\n\
            if (Test-Path -LiteralPath $app) {{\n\
              Log \"start $app\"\n\
@@ -214,8 +231,9 @@ fn spawn_updater(package: &PathBuf, silent_args: Option<&str>) -> Result<(), Str
          Log 'no exe to start'\n",
         ps_single(&package.to_string_lossy()),
         ps_single(&current.to_string_lossy()),
+        ps_single(&install_dir),
         if installer { "$true" } else { "$false" },
-        install_arg_list(silent_args)
+        ps_single(&nsis_args)
     );
     let ps1 = std::env::temp_dir().join("rebased-update.ps1");
     std::fs::write(&ps1, script).map_err(|e| format!("无法写入更新脚本：{e}"))?;
@@ -317,4 +335,21 @@ fn parse_version(value: &str) -> [u32; 3] {
 
 fn hex_lower(bytes: impl AsRef<[u8]>) -> String {
     bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nsis_arguments;
+
+    #[test]
+    fn silent_install_targets_the_running_directory() {
+        let args = nsis_arguments(Some("/S /R"), r"D:\Apps\Rebased\");
+        assert_eq!(args, r"/S /D=D:\Apps\Rebased");
+    }
+
+    #[test]
+    fn install_dir_with_spaces_stays_last_and_unquoted() {
+        let args = nsis_arguments(None, r"C:\Program Files\Rebased");
+        assert_eq!(args, r"/S /D=C:\Program Files\Rebased");
+    }
 }
