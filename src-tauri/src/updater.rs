@@ -133,6 +133,7 @@ fn looks_like_installer(path: &PathBuf) -> bool {
     bytes.windows(12).any(|chunk| chunk == b"NullsoftInst")
 }
 
+#[cfg(not(windows))]
 fn ps_single(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
@@ -155,6 +156,128 @@ fn nsis_arguments(silent_args: Option<&str>, install_dir: &str) -> String {
     args.join(" ")
 }
 
+fn batch_set(name: &str, value: &str) -> String {
+    format!(
+        "set \"{}={}\"",
+        name,
+        value.replace('%', "%%").replace('"', "\"\"")
+    )
+}
+
+#[cfg(windows)]
+fn write_windows_update_batch(
+    pid: u32,
+    package: &Path,
+    current: &Path,
+    install_dir: &str,
+    installer: bool,
+    _nsis_args: &str,
+) -> Result<PathBuf, String> {
+    let package = package.to_string_lossy();
+    let current = current.to_string_lossy();
+    let install_dir = install_dir.trim_end_matches(['\\', '/']);
+    let ext = package
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .eq_ignore_ascii_case("msi");
+    let install_block = if installer && !ext {
+        "if exist \"%PACKAGE%\" (\r\n\
+         >>\"%LOG%\" echo [%DATE% %TIME%] run installer \"%PACKAGE%\" -> \"%INSTALLDIR%\"\r\n\
+         \"%PACKAGE%\" /S /D=%INSTALLDIR%\r\n\
+         >>\"%LOG%\" echo [%DATE% %TIME%] installer exit %ERRORLEVEL%\r\n\
+         ) else (\r\n\
+         >>\"%LOG%\" echo [%DATE% %TIME%] package missing\r\n\
+         exit /b 1\r\n\
+         )\r\n"
+            .to_string()
+    } else if installer && ext {
+        "if exist \"%PACKAGE%\" (\r\n\
+         >>\"%LOG%\" echo [%DATE% %TIME%] run msi \"%PACKAGE%\"\r\n\
+         msiexec /i \"%PACKAGE%\" /qn /norestart INSTALLDIR=\"%INSTALLDIR%\"\r\n\
+         >>\"%LOG%\" echo [%DATE% %TIME%] msi exit %ERRORLEVEL%\r\n\
+         ) else (\r\n\
+         >>\"%LOG%\" echo [%DATE% %TIME%] package missing\r\n\
+         exit /b 1\r\n\
+         )\r\n"
+            .to_string()
+    } else {
+        "if exist \"%PACKAGE%\" (\r\n\
+         >>\"%LOG%\" echo [%DATE% %TIME%] copy \"%PACKAGE%\" -> \"%CURRENT%\"\r\n\
+         copy /Y \"%PACKAGE%\" \"%CURRENT%\" >nul\r\n\
+         if errorlevel 1 (\r\n\
+         >>\"%LOG%\" echo [%DATE% %TIME%] copy failed\r\n\
+         exit /b 1\r\n\
+         )\r\n\
+         ) else (\r\n\
+         >>\"%LOG%\" echo [%DATE% %TIME%] package missing\r\n\
+         exit /b 1\r\n\
+         )\r\n"
+        .to_string()
+    };
+
+    let body = format!(
+        "@echo off\r\n\
+         setlocal EnableExtensions\r\n\
+         {set_log}\r\n\
+         {set_old}\r\n\
+         {set_pkg}\r\n\
+         {set_cur}\r\n\
+         {set_dir}\r\n\
+         >>\"%LOG%\" echo [%DATE% %TIME%] start pid=%OLD_PID% installer={installer} dir=%INSTALLDIR%\r\n\
+         set /a WAIT=0\r\n\
+         :waitpid\r\n\
+         tasklist /FI \"PID eq %OLD_PID%\" 2>nul | find /I \"%OLD_PID%\" >nul && (\r\n\
+         set /a WAIT+=1\r\n\
+         if %WAIT% GEQ 300 goto donepid\r\n\
+         timeout /t 1 /nobreak >nul\r\n\
+         goto waitpid\r\n\
+         )\r\n\
+         :donepid\r\n\
+         timeout /t 2 /nobreak >nul\r\n\
+         {install_block}\
+         timeout /t 1 /nobreak >nul\r\n\
+         if exist \"%CURRENT%\" (\r\n\
+         >>\"%LOG%\" echo [%DATE% %TIME%] start \"%CURRENT%\"\r\n\
+         start \"\" \"%CURRENT%\"\r\n\
+         exit /b 0\r\n\
+         )\r\n\
+         if exist \"%INSTALLDIR%\\rebased.exe\" (\r\n\
+         >>\"%LOG%\" echo [%DATE% %TIME%] start \"%INSTALLDIR%\\rebased.exe\"\r\n\
+         start \"\" \"%INSTALLDIR%\\rebased.exe\"\r\n\
+         exit /b 0\r\n\
+         )\r\n\
+         if exist \"%INSTALLDIR%\\Rebased.exe\" (\r\n\
+         >>\"%LOG%\" echo [%DATE% %TIME%] start \"%INSTALLDIR%\\Rebased.exe\"\r\n\
+         start \"\" \"%INSTALLDIR%\\Rebased.exe\"\r\n\
+         exit /b 0\r\n\
+         )\r\n\
+         >>\"%LOG%\" echo [%DATE% %TIME%] no exe to start\r\n\
+         exit /b 1\r\n",
+        set_log = batch_set("LOG", &std::env::temp_dir().join("rebased-update.log").to_string_lossy()),
+        set_old = batch_set("OLD_PID", &pid.to_string()),
+        set_pkg = batch_set("PACKAGE", &package),
+        set_cur = batch_set("CURRENT", &current),
+        set_dir = batch_set("INSTALLDIR", install_dir),
+        installer = if installer { "true" } else { "false" },
+        install_block = install_block,
+    );
+    let cmd_path = std::env::temp_dir().join("rebased-update.cmd");
+    std::fs::write(&cmd_path, body).map_err(|e| format!("无法写入更新脚本：{e}"))?;
+    Ok(cmd_path)
+}
+
+fn append_update_log(line: &str) {
+    let log = std::env::temp_dir().join("rebased-update.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
 fn spawn_updater(package: &PathBuf, silent_args: Option<&str>) -> Result<(), String> {
     let current = std::env::current_exe().map_err(|e| format!("无法定位当前程序：{e}"))?;
     let install_dir = current
@@ -165,6 +288,24 @@ fn spawn_updater(package: &PathBuf, silent_args: Option<&str>) -> Result<(), Str
     let pid = std::process::id();
     let installer = looks_like_installer(package);
     let nsis_args = nsis_arguments(silent_args, &install_dir);
+
+    #[cfg(windows)]
+    {
+        let cmd_path = write_windows_update_batch(
+            pid,
+            package,
+            &current,
+            &install_dir,
+            installer,
+            &nsis_args,
+        )?;
+        launch_detached_updater(&cmd_path)?;
+        std::thread::sleep(Duration::from_millis(500));
+        return Ok(());
+    }
+
+    #[cfg(not(windows))]
+    {
     let script = format!(
         "$ErrorActionPreference = 'Continue'\n\
          $oldPid = {pid}\n\
@@ -270,10 +411,92 @@ fn spawn_updater(package: &PathBuf, silent_args: Option<&str>) -> Result<(), Str
     bytes.extend_from_slice(script.as_bytes());
     std::fs::write(&ps1, bytes).map_err(|e| format!("无法写入更新脚本：{e}"))?;
     launch_orphaned_powershell(&ps1)?;
-    std::thread::sleep(Duration::from_millis(300));
+    std::thread::sleep(Duration::from_millis(500));
     Ok(())
+    }
 }
 
+#[cfg(windows)]
+fn hide_window(cmd: &mut Command) {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x0800_0000);
+}
+
+#[cfg(windows)]
+fn launch_detached_updater(script: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let script_arg = script.to_string_lossy().into_owned();
+    append_update_log(&format!(
+        "{} launcher spawn cmd /c \"{script_arg}\"",
+        chrono_lite_timestamp()
+    ));
+
+    let mut cmd = Command::new("cmd.exe");
+    cmd.arg("/c").arg(&*script_arg);
+    hide_window(&mut cmd);
+    cmd.creation_flags(
+        DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW,
+    );
+    match cmd.spawn() {
+        Ok(child) => {
+            append_update_log(&format!(
+                "{} launcher pid={}",
+                chrono_lite_timestamp(),
+                child.id()
+            ));
+            Ok(())
+        }
+        Err(e) => {
+            append_update_log(&format!(
+                "{} launcher spawn failed: {e}",
+                chrono_lite_timestamp()
+            ));
+            launch_via_cim_cmd(&format!("cmd.exe /c \"{script_arg}\""))
+        }
+    }
+}
+
+#[cfg(windows)]
+fn launch_via_cim_cmd(command_line: &str) -> Result<(), String> {
+    let escaped = command_line.replace('\'', "''");
+    let mut cmd = Command::new("powershell");
+    cmd.args([
+        "-NoProfile",
+        "-WindowStyle",
+        "Hidden",
+        "-Command",
+        &format!(
+            "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine='{escaped}'}}; if ($r.ReturnValue -ne 0) {{ exit 1 }}"
+        ),
+    ]);
+    hide_window(&mut cmd);
+    let status = cmd.status().map_err(|e| format!("无法启动更新进程：{e}"))?;
+    if status.success() {
+        append_update_log(&format!("{} launcher cim ok", chrono_lite_timestamp()));
+        Ok(())
+    } else {
+        Err("无法启动更新进程".to_string())
+    }
+}
+
+fn chrono_lite_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{secs}")
+}
+
+#[cfg(not(windows))]
 fn hide_window(cmd: &mut Command) {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -285,6 +508,7 @@ fn hide_window(cmd: &mut Command) {
     }
 }
 
+#[cfg(not(windows))]
 fn orphan_via_cim(command_line: &str) -> Result<(), String> {
     let escaped = command_line.replace('\'', "''");
     let mut cmd = Command::new("powershell");
@@ -306,6 +530,7 @@ fn orphan_via_cim(command_line: &str) -> Result<(), String> {
     }
 }
 
+#[cfg(not(windows))]
 fn orphan_via_wmic(command_line: &str) -> Result<(), String> {
     let mut cmd = Command::new("wmic");
     cmd.args(["process", "call", "create", command_line]);
@@ -318,6 +543,7 @@ fn orphan_via_wmic(command_line: &str) -> Result<(), String> {
     }
 }
 
+#[cfg(not(windows))]
 fn launch_orphaned_powershell(script: &Path) -> Result<(), String> {
     let command_line = format!(
         "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{}\"",
