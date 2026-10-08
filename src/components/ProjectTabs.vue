@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref } from "vue";
 import { sameRepo } from "../path";
 import type { ProjectTab } from "../types";
 import Icons from "./Icons.vue";
@@ -12,20 +13,75 @@ const emit = defineEmits<{
   select: [path: string];
   close: [path: string];
   add: [];
+  reorder: [from: number, to: number];
 }>();
+
+const dragging = ref(-1);
+const overIndex = ref(-1);
+let suppressClick = false;
+
+function onClick(path: string) {
+  if (suppressClick) {
+    suppressClick = false;
+    return;
+  }
+  emit("select", path);
+}
+
+function onPointerDown(index: number, event: PointerEvent) {
+  if (event.button !== 0) return;
+  if ((event.target as HTMLElement).closest(".close")) return;
+  const startX = event.clientX;
+  const startY = event.clientY;
+  let moved = false;
+
+  const move = (ev: PointerEvent) => {
+    if (!moved && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 6) return;
+    moved = true;
+    dragging.value = index;
+    const hit = document.elementFromPoint(ev.clientX, ev.clientY)?.closest<HTMLElement>("[data-index]");
+    if (!hit) return;
+    const next = Number(hit.dataset.index);
+    if (Number.isInteger(next)) overIndex.value = next;
+  };
+
+  const up = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    window.removeEventListener("pointercancel", up);
+    const target = overIndex.value;
+    dragging.value = -1;
+    overIndex.value = -1;
+    if (moved && target >= 0 && target !== index) {
+      emit("reorder", index, target);
+      suppressClick = true;
+    }
+  };
+
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+  window.addEventListener("pointercancel", up);
+}
 </script>
 
 <template>
   <div class="tabs">
-    <div class="list">
+    <div class="list" :class="{ dragging: dragging >= 0 }">
       <button
-        v-for="tab in tabs"
+        v-for="(tab, index) in tabs"
         :key="tab.path"
         type="button"
         class="tab"
-        :class="{ active: sameRepo(tab.path, activePath), merging: tab.merging }"
+        :data-index="index"
+        :class="{
+          active: sameRepo(tab.path, activePath),
+          merging: tab.merging,
+          dragging: dragging === index,
+          'drop-target': overIndex === index && dragging !== index,
+        }"
         :title="tab.path"
-        @click="emit('select', tab.path)"
+        @pointerdown="onPointerDown(index, $event)"
+        @click="onClick(tab.path)"
         @click.middle.prevent="emit('close', tab.path)"
       >
         <span class="label">
@@ -79,6 +135,21 @@ const emit = defineEmits<{
   padding: 0 8px 0 12px;
   color: var(--text-muted);
   border-right: 1px solid var(--border);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.list.dragging .tab {
+  cursor: grabbing;
+}
+
+.tab.dragging {
+  opacity: 0.45;
+}
+
+.tab.drop-target {
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .tab:hover {

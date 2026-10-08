@@ -339,17 +339,40 @@ async function syncMergeState(openIfNeeded: boolean) {
   emitMeta();
 }
 
-async function bootstrap(openConflicts = false) {
+let bootstrapTask: Promise<void> | null = null;
+let mergePrompted = false;
+
+function revealMerge() {
+  if (mergePrompted) return;
+  mergePrompted = true;
+  if (conflictState.value?.inProgress) {
+    showConflicts.value = true;
+  }
+}
+
+function ensureLoaded(openConflicts = false) {
+  if (loaded.value) {
+    if (openConflicts) revealMerge();
+    return;
+  }
+  if (bootstrapTask) {
+    if (openConflicts) void bootstrapTask.then(() => revealMerge());
+    return;
+  }
+  const pendingOpen = openRepo(props.path);
+  bootstrapTask = runBootstrap(pendingOpen, openConflicts).finally(() => {
+    bootstrapTask = null;
+  });
+}
+
+async function runBootstrap(pendingOpen: ReturnType<typeof openRepo>, openConflicts: boolean) {
   const info = await withBusy("正在打开仓库…", async () => {
-    const opened = await openRepo(props.path);
+    const opened = await pendingOpen;
     repo.value = opened;
     if (!opened.isGit) {
       showFiles.value = true;
     }
     await refreshAll();
-    if (openConflicts) {
-      await syncMergeState(true);
-    }
     loaded.value = true;
     watchingPath.value = opened.path;
     void watchRepo(opened.path).catch(() => undefined);
@@ -358,7 +381,9 @@ async function bootstrap(openConflicts = false) {
   });
   if (!info) {
     emit("failed", props.path);
+    return;
   }
+  if (openConflicts || props.active) revealMerge();
 }
 
 async function refreshStatus() {
@@ -964,11 +989,13 @@ watch(busy, (value) => {
 watch(
   () => props.active,
   (active) => {
-    if (active && !loaded.value) {
-      void bootstrap(true);
-    } else if (active && loaded.value) {
-      scheduleGitRefresh("git");
+    if (!active) return;
+    if (!loaded.value) {
+      ensureLoaded(true);
+      return;
     }
+    revealMerge();
+    scheduleGitRefresh("git");
   },
 );
 
@@ -990,9 +1017,7 @@ onMounted(() => {
   }).then((unlisten) => {
     stopWatch = unlisten;
   });
-  if (props.active) {
-    void bootstrap(true);
-  }
+  ensureLoaded(props.active);
 });
 
 onUnmounted(() => {
