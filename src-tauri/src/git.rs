@@ -664,7 +664,56 @@ pub fn commit(repo: &Path, message: &str, amend: bool, include_paths: &[String])
     Ok(())
 }
 
+fn ref_exists(repo: &Path, reference: &str) -> bool {
+    exec_git(repo, &["show-ref", "--verify", "--quiet", reference])
+        .map(|(ok, _, _)| ok)
+        .unwrap_or(false)
+}
+
+fn remote_tracking_target(repo: &Path, branch: &str) -> Option<String> {
+    let remote_ref = format!("refs/remotes/{branch}");
+    if !ref_exists(repo, &remote_ref) {
+        return None;
+    }
+
+    let remotes = run_git(repo, &["remote"]).ok()?;
+    remotes
+        .lines()
+        .map(str::trim)
+        .filter(|remote| !remote.is_empty())
+        .filter_map(|remote| {
+            branch
+                .strip_prefix(&format!("{remote}/"))
+                .map(|name| (remote.len(), name))
+        })
+        .filter(|(_, name)| !name.is_empty() && *name != "HEAD")
+        .max_by_key(|(remote_len, _)| *remote_len)
+        .map(|(_, name)| name.to_string())
+}
+
 pub fn checkout(repo: &Path, branch: &str) -> Result<(), String> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Err("请选择要签出的分支".to_string());
+    }
+
+    // Prefer an exact local branch when local and remote display names happen to collide.
+    if ref_exists(repo, &format!("refs/heads/{branch}")) {
+        run_git(repo, &["checkout", branch])?;
+        return Ok(());
+    }
+
+    // Checking out a remote-tracking ref directly detaches HEAD. Create the matching
+    // local branch (or reuse it) and configure its upstream in the same Git command.
+    if let Some(local) = remote_tracking_target(repo, branch) {
+        if ref_exists(repo, &format!("refs/heads/{local}")) {
+            run_git(repo, &["checkout", &local])?;
+        } else {
+            run_git(repo, &["checkout", "--track", "-b", &local, branch])?;
+        }
+        return Ok(());
+    }
+
     run_git(repo, &["checkout", branch])?;
     Ok(())
 }
@@ -2185,4 +2234,66 @@ fn non_interactive_editor() -> &'static str {
 
 fn true_editor() -> String {
     non_interactive_editor().to_string()
+}
+
+#[cfg(test)]
+mod checkout_tests {
+    use super::checkout;
+    use std::path::Path;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git should run");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn checkout_remote_branch_creates_tracking_local_branch() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("rebased-checkout-{unique}"));
+        let remote = root.join("remote.git");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&remote).expect("create remote dir");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+
+        git(&remote, &["init", "--bare"]);
+        git(&repo, &["init"]);
+        git(&repo, &["config", "user.name", "Rebased Test"]);
+        git(&repo, &["config", "user.email", "rebased@example.test"]);
+        std::fs::write(repo.join("README.md"), "test\n").expect("write fixture");
+        git(&repo, &["add", "README.md"]);
+        git(&repo, &["commit", "-m", "initial"]);
+        git(&repo, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(&repo, &["checkout", "-b", "release-front_test"]);
+        git(&repo, &["push", "-u", "origin", "release-front_test"]);
+        git(&repo, &["checkout", "-"]);
+        git(&repo, &["branch", "-D", "release-front_test"]);
+
+        checkout(&repo, "origin/release-front_test").expect("remote checkout should succeed");
+
+        assert_eq!(
+            git(&repo, &["symbolic-ref", "--short", "HEAD"]),
+            "release-front_test"
+        );
+        assert_eq!(
+            git(&repo, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+            "origin/release-front_test"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove fixture");
+    }
 }
