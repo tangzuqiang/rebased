@@ -24,9 +24,6 @@ const pendingResolved = ref<string[]>([]);
 const visibleFiles = computed(() =>
   props.state.files.filter((file) => !pendingResolved.value.includes(file.path)),
 );
-const selectedFiles = computed(() =>
-  visibleFiles.value.filter((file) => selected.value.includes(file.path)),
-);
 const canMergeOne = computed(() => selected.value.length === 1 && Boolean(selected.value[0]));
 
 const tableRows = computed(() => {
@@ -134,6 +131,14 @@ function accept(side: "ours" | "theirs", paths?: string[]) {
   emit("accept", { paths: list, side });
 }
 
+function acceptAll(side: "ours" | "theirs") {
+  const paths = visibleFiles.value.map((file) => file.path);
+  if (!paths.length) return;
+  const label = side === "ours" ? "您的" : "他们的";
+  if (!window.confirm(`确定对全部 ${paths.length} 个冲突文件使用${label}版本？`)) return;
+  accept(side, paths);
+}
+
 function cancelMerge() {
   if (props.busy) return;
   if (!window.confirm("确定取消本次合并？工作区将恢复到合并前的状态。")) return;
@@ -202,11 +207,11 @@ function finishMerge() {
     <template #footer>
       <button type="button" class="danger-btn" :disabled="busy" @click="cancelMerge">取消合并</button>
       <span class="spacer" />
-      <button type="button" class="secondary-btn" :disabled="busy || !selectedFiles.length" @click="accept('ours')">
-        使用您的
+      <button type="button" class="secondary-btn" :disabled="busy || !visibleFiles.length" @click="acceptAll('ours')">
+        全部使用您的
       </button>
-      <button type="button" class="secondary-btn" :disabled="busy || !selectedFiles.length" @click="accept('theirs')">
-        使用他们的
+      <button type="button" class="secondary-btn" :disabled="busy || !visibleFiles.length" @click="acceptAll('theirs')">
+        全部使用他们的
       </button>
       <button type="button" class="secondary-btn" :disabled="busy || !canMergeOne" @click="openMerge()">
         合并

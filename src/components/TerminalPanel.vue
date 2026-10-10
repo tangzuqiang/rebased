@@ -205,18 +205,30 @@ header {
 }
 
 .close {
-  width: 16px;
-  height: 16px;
-  border-radius: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--text-dim);
+  color: var(--danger);
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.12s, background-color 0.12s, color 0.12s;
+}
+
+.tab:hover .close,
+.tab.active .close {
+  opacity: 1;
 }
 
 .close:hover {
-  background: var(--bg-hover);
-  color: var(--text);
+  background: var(--danger);
+  color: #fff;
+}
+
+.close:active {
+  transform: scale(0.9);
 }
 
 .add {

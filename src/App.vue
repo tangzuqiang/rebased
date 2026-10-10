@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import {
   appVersion,
   checkUpdate,
@@ -30,6 +30,8 @@ const recent = ref<RecentProject[]>([]);
 const showSettings = ref(false);
 const version = ref("");
 let persistTimer = 0;
+
+const workspaceTabs = computed(() => [...tabs.value].sort((a, b) => a.path.localeCompare(b.path)));
 
 function persist() {
   window.clearTimeout(persistTimer);
@@ -93,6 +95,13 @@ function closeTab(path: string) {
     const next = tabs.value[index] ?? tabs.value[index - 1];
     activePath.value = next?.path ?? "";
   }
+  persist();
+}
+
+function reorderTab(from: number, to: number) {
+  const [moved] = tabs.value.splice(from, 1);
+  if (!moved) return;
+  tabs.value.splice(to, 0, moved);
   persist();
 }
 
@@ -184,6 +193,7 @@ onMounted(async () => {
       @select="selectTab"
       @close="closeTab"
       @add="handleOpen"
+      @reorder="reorderTab"
     />
     <WelcomeView
       v-if="!tabs.length"
@@ -194,7 +204,7 @@ onMounted(async () => {
       @remove-recent="handleRemoveRecent"
     />
     <RepoWorkspace
-      v-for="tab in tabs"
+      v-for="tab in workspaceTabs"
       v-show="sameRepo(tab.path, activePath)"
       :key="tab.path"
       :path="tab.path"
