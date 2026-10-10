@@ -86,6 +86,16 @@ function selectTab(path: string) {
   persist();
 }
 
+function reorderTabs(from: number, to: number) {
+  if (from === to || from < 0 || to < 0 || from >= tabs.value.length || to >= tabs.value.length) return;
+  const next = tabs.value.slice();
+  const [moved] = next.splice(from, 1);
+  if (!moved) return;
+  next.splice(to, 0, moved);
+  tabs.value = next;
+  persist();
+}
+
 function closeTab(path: string) {
   const index = tabs.value.findIndex((tab) => sameRepo(tab.path, path));
   if (index < 0) return;
@@ -193,7 +203,7 @@ onMounted(async () => {
       @select="selectTab"
       @close="closeTab"
       @add="handleOpen"
-      @reorder="reorderTab"
+      @reorder="reorderTabs"
     />
     <WelcomeView
       v-if="!tabs.length"
