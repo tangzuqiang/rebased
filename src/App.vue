@@ -108,13 +108,6 @@ function closeTab(path: string) {
   persist();
 }
 
-function reorderTab(from: number, to: number) {
-  const [moved] = tabs.value.splice(from, 1);
-  if (!moved) return;
-  tabs.value.splice(to, 0, moved);
-  persist();
-}
-
 function updateMeta(payload: ProjectTab) {
   const tab = tabs.value.find((item) => sameRepo(item.path, payload.path));
   if (!tab) return;
