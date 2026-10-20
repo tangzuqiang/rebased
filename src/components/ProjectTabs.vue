@@ -10,6 +10,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  batch: [];
   select: [path: string];
   close: [path: string];
   add: [];
@@ -80,6 +81,9 @@ onUnmounted(onPointerUp);
 
 <template>
   <div class="tabs">
+    <button type="button" class="icon-btn batch" title="批量 Git 操作中心" @click="emit('batch')">
+      <Icons name="branch" :size="13" />
+    </button>
     <div ref="listEl" class="list" :class="{ dragging: draggingPath }">
       <button
         v-for="tab in tabs"
@@ -132,6 +136,14 @@ onUnmounted(onPointerUp);
   min-width: 0;
   flex: 1;
   overflow-x: auto;
+}
+
+.batch {
+  margin: 3px 4px;
+  flex: none;
+  border-right: 1px solid var(--border-soft);
+  border-radius: 0;
+  padding-right: 5px;
 }
 
 .list::-webkit-scrollbar {

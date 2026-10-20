@@ -13,6 +13,7 @@ import {
 import { repoNameFromPath, sameRepo } from "./path";
 import type { ProjectTab, RecentProject } from "./types";
 import ProjectTabs from "./components/ProjectTabs.vue";
+import BatchGitCenter from "./components/BatchGitCenter.vue";
 import RepoWorkspace from "./components/RepoWorkspace.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
 import ToastHost from "./components/ToastHost.vue";
@@ -28,6 +29,7 @@ const tabs = ref<ProjectTab[]>([]);
 const activePath = ref("");
 const recent = ref<RecentProject[]>([]);
 const showSettings = ref(false);
+const showBatchGit = ref(false);
 const version = ref("");
 let persistTimer = 0;
 
@@ -193,10 +195,17 @@ onMounted(async () => {
     <ProjectTabs
       :tabs="tabs"
       :active-path="activePath"
+      @batch="showBatchGit = true"
       @select="selectTab"
       @close="closeTab"
       @add="handleOpen"
       @reorder="reorderTabs"
+    />
+    <BatchGitCenter
+      v-if="showBatchGit"
+      :tabs="tabs"
+      @close="showBatchGit = false"
+      @updated="updateMeta"
     />
     <WelcomeView
       v-if="!tabs.length"
