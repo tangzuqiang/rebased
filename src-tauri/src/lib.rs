@@ -240,12 +240,12 @@ async fn merge_continue(state: State<'_, AppState>, repo: Option<String>) -> Res
 #[tauri::command]
 async fn resolve_conflict(
     state: State<'_, AppState>,
-    path: String,
+    paths: Vec<String>,
     side: String,
     repo: Option<String>,
 ) -> Result<MergeState, String> {
     let repo = repo_dir(&state, repo)?;
-    run_blocking(move || git::resolve_conflict(&repo, &path, &side)).await
+    run_blocking(move || git::resolve_conflicts(&repo, &paths, &side)).await
 }
 
 #[tauri::command]
@@ -535,14 +535,51 @@ async fn push_upto(
 }
 
 #[tauri::command]
-async fn commit_diff(
+async fn rev_diff_files(
     state: State<'_, AppState>,
     from: String,
     to: String,
     repo: Option<String>,
-) -> Result<FileDiff, String> {
+) -> Result<Vec<GitFile>, String> {
     let path = repo_dir(&state, repo)?;
-    run_blocking(move || git::commit_diff(&path, &from, &to)).await
+    run_blocking(move || git::rev_diff_files(&path, &from, &to)).await
+}
+
+#[tauri::command]
+async fn write_worktree_file(
+    state: State<'_, AppState>,
+    path: String,
+    content: String,
+    repo: Option<String>,
+) -> Result<(), String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || git::write_worktree_file(&repo, &path, &content)).await
+}
+
+#[tauri::command]
+async fn rev_diff_file(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+    path: String,
+    untracked: bool,
+    context: Option<u32>,
+    ignore_whitespace: Option<bool>,
+    repo: Option<String>,
+) -> Result<FileDiff, String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || {
+        git::rev_diff_file(
+            &repo,
+            &from,
+            &to,
+            &path,
+            untracked,
+            context.unwrap_or(3),
+            ignore_whitespace.unwrap_or(false),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -683,16 +720,6 @@ async fn remove_worktree(state: State<'_, AppState>, path: String, repo: Option<
 }
 
 #[tauri::command]
-async fn working_tree_diff(
-    state: State<'_, AppState>,
-    rev: String,
-    repo: Option<String>,
-) -> Result<FileDiff, String> {
-    let path = repo_dir(&state, repo)?;
-    run_blocking(move || git::working_tree_diff(&path, &rev)).await
-}
-
-#[tauri::command]
 fn start_terminal(
     app: AppHandle,
     hub: State<term::TerminalHub>,
@@ -829,7 +856,9 @@ pub fn run() {
             delete_worktree,
             drop_commit,
             push_upto,
-            commit_diff,
+            rev_diff_files,
+            rev_diff_file,
+            write_worktree_file,
             fixup_commit,
             squash_commit,
             rebase_plan,
@@ -846,7 +875,6 @@ pub fn run() {
             apply_patch,
             add_worktree,
             remove_worktree,
-            working_tree_diff,
             start_terminal,
             write_terminal,
             resize_terminal,

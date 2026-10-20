@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { getConflictFile } from "../api";
 import { alignDiff3 } from "../diff3";
 import { commentPrefix, findInTextarea, handleIdeEditorKey, writeTextarea } from "../editorKeys";
 import { highlightCode } from "../highlight";
+import { joinLines, remapLines } from "../mergeLines";
 import "highlight.js/styles/atom-one-dark.css";
 import { notify } from "../notify";
 import type { BlameLine, Diff3Row, DiffKind, MergeFileContent, MergeState } from "../types";
@@ -55,11 +56,16 @@ interface FoldRow {
 }
 
 type VRow = ViewerRow | FoldRow;
+type Side = "ours" | "theirs";
+type Choice = Side | "base" | "both";
+
+const ROW_HEIGHT = 18;
 
 const content = ref<MergeFileContent | null>(null);
 const result = ref("");
+const seededText = ref("");
 const resultLines = ref<Array<string | null>>([]);
-const choice = ref<Record<string, "ours" | "theirs" | "base">>({});
+const choice = ref<Record<string, Choice>>({});
 const settled = ref<Record<string, { ours: boolean; theirs: boolean }>>({});
 const loading = ref(false);
 const error = ref("");
@@ -70,7 +76,6 @@ const currentHunk = ref(0);
 const mergeReady = ref(false);
 const completeOpen = ref(false);
 const completeShown = ref(false);
-const syncing = ref(false);
 const oursPane = ref<HTMLElement | null>(null);
 const resultPane = ref<HTMLElement | null>(null);
 const theirsPane = ref<HTMLElement | null>(null);
@@ -80,12 +85,15 @@ const resultEditor = ref<HTMLTextAreaElement | null>(null);
 const findOpen = ref(false);
 const findQuery = ref("");
 const findHint = ref("");
-const collapsedFolds = ref<Set<number>>(new Set());
+const expandedFolds = ref<Set<number>>(new Set());
 
 const FOLD_THRESHOLD = 8;
 
+const editable = computed(() => Boolean(content.value && !content.value.binary && !content.value.tooLarge));
+const dirty = computed(() => result.value !== seededText.value || Object.keys(choice.value).length > 0);
+
 const rows = computed<Diff3Row[]>(() => {
-  if (!content.value || content.value.binary) return [];
+  if (!content.value || !editable.value) return [];
   return alignDiff3(content.value.ours, content.value.base, content.value.theirs, {
     ignoreWhitespace: ignoreWhitespace.value,
     blame: {
@@ -135,7 +143,7 @@ const nonConflictCount = computed(() => hunks.value.filter((h) => !h.conflict &&
 
 const highlighted = computed(() => {
   const all = rows.value;
-  if (!all.length || !content.value || content.value.binary)
+  if (!all.length || !content.value || !editable.value)
     return { ours: [] as string[], theirs: [] as string[] };
   const oursLines = all.map((r) => r.ours);
   const theirsLines = all.map((r) => r.theirs);
@@ -192,7 +200,9 @@ const viewerRows = computed<VRow[]>(() => {
 
       if (count > FOLD_THRESHOLD) {
         result.push({ isFold: true, count, start });
-        for (let j = start; j < i; j++) result.push(makeViewerRow(j, hl, undefined));
+        if (expandedFolds.value.has(start)) {
+          for (let j = start; j < i; j++) result.push(makeViewerRow(j, hl, undefined));
+        }
       } else {
         for (let j = start; j < i; j++) result.push(makeViewerRow(j, hl, undefined));
       }
@@ -201,7 +211,32 @@ const viewerRows = computed<VRow[]>(() => {
   return result;
 });
 
-const resultLineCount = computed(() => Math.max(rows.value.length, result.value.split("\n").length));
+const rowToVisual = computed(() => {
+  const map: number[] = new Array(rows.value.length).fill(0);
+  viewerRows.value.forEach((vr, visual) => {
+    if (!vr.isFold) {
+      map[vr.rowIndex] = visual;
+    } else if (!expandedFolds.value.has(vr.start)) {
+      for (let r = vr.start; r < vr.start + vr.count; r++) map[r] = visual;
+    }
+  });
+  return map;
+});
+
+const resultLayout = computed(() => {
+  const starts: number[] = [];
+  const owners: number[] = [];
+  resultLines.value.forEach((line, row) => {
+    starts.push(owners.length);
+    if (line === null) return;
+    const count = line.split("\n").length;
+    for (let k = 0; k < count; k++) owners.push(row);
+  });
+  starts.push(owners.length);
+  return { starts, owners };
+});
+
+const resultLineCount = computed(() => Math.max(1, result.value.split("\n").length));
 
 watch(
   () => props.path,
@@ -219,7 +254,7 @@ watch([() => content.value?.path, ignoreWhitespace], () => {
   completeOpen.value = false;
   completeShown.value = false;
   overwrite.value = "";
-  collapsedFolds.value = new Set();
+  expandedFolds.value = new Set();
 });
 
 watch(resultEditor, (el) => {
@@ -282,15 +317,12 @@ function defaultResultLine(row: Diff3Row) {
   return lineFrom(row, "ours");
 }
 
-function joinResult(lines: Array<string | null>) {
-  return lines.filter((l): l is string => l !== null).join("\n");
-}
-
 function seedResult() {
   resultLines.value = rows.value.map(defaultResultLine);
   choice.value = {};
   settled.value = {};
-  setResultText(joinResult(resultLines.value));
+  seededText.value = joinLines(resultLines.value);
+  setResultText(seededText.value);
 }
 
 function markComplete() {
@@ -315,7 +347,8 @@ function hunkDone(hunk: Hunk) {
   const state = settled.value[key];
   if (!state) return false;
   if (hunk.conflict) {
-    return Boolean(choice.value[key] === "ours" || choice.value[key] === "theirs" || (state.ours && state.theirs));
+    const picked = choice.value[key];
+    return picked === "ours" || picked === "theirs" || picked === "both" || (state.ours && state.theirs);
   }
   return (hunk.ours ? state.ours : true) && (hunk.theirs ? state.theirs : true);
 }
@@ -337,18 +370,37 @@ function hunkOf(index: number) {
   return hunks.value.find((h) => index >= h.start && index < h.end);
 }
 
-function applyHunk(hunk: Hunk, side: "ours" | "theirs" | "base") {
-  syncLinesFromResult();
-  const source = rows.value;
-  const next = source.map((row, index) => resultLines.value[index] ?? defaultResultLine(row));
+function fillHunk(hunk: Hunk, lines: Array<string | null>, picked: Choice) {
+  const next = [...resultLines.value];
   for (let i = hunk.start; i < hunk.end; i += 1) {
-    next[i] = lineFrom(source[i], side);
+    next[i] = lines[i - hunk.start] ?? null;
   }
   resultLines.value = next;
-  choice.value = { ...choice.value, [hunkKey(hunk)]: side };
-  setResultText(joinResult(next));
+  choice.value = { ...choice.value, [hunkKey(hunk)]: picked };
+  setResultText(joinLines(next));
   currentHunk.value = Math.max(0, hunks.value.findIndex((item) => item.start === hunk.start));
+}
+
+function applyHunk(hunk: Hunk, side: Side | "base") {
+  const source = rows.value;
+  const lines: Array<string | null> = [];
+  for (let i = hunk.start; i < hunk.end; i += 1) lines.push(lineFrom(source[i], side));
+  fillHunk(hunk, lines, side);
   checkConflictsResolved();
+}
+
+function applyBoth(hunk: Hunk, first: Side, second: Side) {
+  const source = rows.value;
+  const merged: string[] = [];
+  for (const side of [first, second]) {
+    for (let i = hunk.start; i < hunk.end; i += 1) {
+      const line = lineFrom(source[i], side);
+      if (line !== null) merged.push(line);
+    }
+  }
+  const lines: Array<string | null> = new Array(hunk.end - hunk.start).fill(null);
+  if (merged.length) lines[0] = merged.join("\n");
+  fillHunk(hunk, lines, "both");
 }
 
 function setResultText(text: string) {
@@ -356,33 +408,28 @@ function setResultText(text: string) {
   writeTextarea(resultEditor.value, text);
 }
 
-function syncLinesFromResult() {
-  const visual = result.value.split("\n");
-  let offset = 0;
-  resultLines.value = resultLines.value.map((line) => {
-    if (line === null) return null;
-    const value = visual[offset] ?? line;
-    offset += 1;
-    return value;
-  });
-}
-
 function onResultInput(event: Event) {
   const target = event.target;
   if (!(target instanceof HTMLTextAreaElement)) return;
   result.value = target.value;
+  resultLines.value = remapLines(resultLines.value, result.value);
 }
 
-function acceptHunk(hunk: Hunk, side: "ours" | "theirs") {
-  applyHunk(hunk, side);
+function acceptHunk(hunk: Hunk, side: Side) {
+  const other: Side = side === "ours" ? "theirs" : "ours";
+  if (hunk.conflict && choice.value[hunkKey(hunk)] === other && sideSettled(hunk, other)) {
+    applyBoth(hunk, other, side);
+  } else {
+    applyHunk(hunk, side);
+  }
   markSettled(hunk, { [side]: true });
   checkConflictsResolved();
 }
 
-function rejectHunk(hunk: Hunk, side: "ours" | "theirs") {
+function rejectHunk(hunk: Hunk, side: Side) {
   const current = choice.value[hunkKey(hunk)];
-  const other = side === "ours" ? "theirs" : "ours";
-  applyHunk(hunk, current === other ? other : "base");
+  const other: Side = side === "ours" ? "theirs" : "ours";
+  applyHunk(hunk, current === other || current === "both" ? other : "base");
   markSettled(hunk, { [side]: true });
   checkConflictsResolved();
 }
@@ -421,7 +468,7 @@ function sideKind(index: number, side: "ours" | "theirs"): string {
   if (!hunk) return raw;
   if (sideSettled(hunk, side)) {
     const picked = choice.value[hunkKey(hunk)];
-    if (picked !== side) return raw === "empty" ? "empty" : "discarded";
+    if (picked !== side && picked !== "both") return raw === "empty" ? "empty" : "discarded";
     return soften(raw);
   }
   return raw;
@@ -492,24 +539,58 @@ function makeViewerRow(index: number, hl: { ours: string[]; theirs: string[] }, 
   };
 }
 
-function panes() {
-  return [oursPane.value, resultPane.value, theirsPane.value, leftGutter.value, rightGutter.value];
+function sidePanes() {
+  return [oursPane.value, theirsPane.value, leftGutter.value, rightGutter.value];
+}
+
+function codePanes() {
+  return [oursPane.value, resultPane.value, theirsPane.value];
+}
+
+let scrollDriver: HTMLElement | null = null;
+let scrollDriverTimer = 0;
+
+function holdScrollDriver(el: HTMLElement) {
+  scrollDriver = el;
+  window.clearTimeout(scrollDriverTimer);
+  scrollDriverTimer = window.setTimeout(() => {
+    scrollDriver = null;
+  }, 80);
+}
+
+function sideTopToResult(top: number) {
+  const visual = Math.floor(top / ROW_HEIGHT);
+  const vr = viewerRows.value[visual];
+  if (!vr) return resultLayout.value.owners.length * ROW_HEIGHT;
+  const row = vr.isFold ? vr.start : vr.rowIndex;
+  const frac = vr.isFold || resultLines.value[row] === null ? 0 : top - visual * ROW_HEIGHT;
+  return resultLayout.value.starts[row] * ROW_HEIGHT + frac;
+}
+
+function resultTopToSide(top: number) {
+  const line = Math.floor(top / ROW_HEIGHT);
+  const { owners, starts } = resultLayout.value;
+  const row = owners[line];
+  if (row === undefined) return viewerRows.value.length * ROW_HEIGHT;
+  const frac = line === starts[row] ? top - line * ROW_HEIGHT : 0;
+  return rowToVisual.value[row] * ROW_HEIGHT + frac;
 }
 
 function syncScroll(event: Event) {
-  if (syncing.value) return;
   const source = event.target;
   if (!(source instanceof HTMLElement)) return;
-  syncing.value = true;
-  for (const pane of panes()) {
-    if (pane && pane !== source) {
-      pane.scrollTop = source.scrollTop;
-      if (pane === oursPane.value || pane === resultPane.value || pane === theirsPane.value) {
-        pane.scrollLeft = source.scrollLeft;
-      }
-    }
+  if (scrollDriver && scrollDriver !== source) return;
+  holdScrollDriver(source);
+  if (source === resultPane.value) {
+    const top = resultTopToSide(source.scrollTop);
+    for (const pane of sidePanes()) if (pane) pane.scrollTop = top;
+  } else {
+    for (const pane of sidePanes()) if (pane && pane !== source) pane.scrollTop = source.scrollTop;
+    if (resultPane.value) resultPane.value.scrollTop = sideTopToResult(source.scrollTop);
   }
-  syncing.value = false;
+  if (codePanes().includes(source)) {
+    for (const pane of codePanes()) if (pane && pane !== source) pane.scrollLeft = source.scrollLeft;
+  }
 }
 
 async function goHunk(delta: number) {
@@ -523,9 +604,11 @@ async function goHunk(delta: number) {
   if (!target) return;
   currentHunk.value = Math.max(0, hunks.value.findIndex((h) => h.start === target.start));
   await nextTick();
-  const top = Math.max(0, target.start * 18 - 80);
-  for (const pane of panes()) {
-    if (pane) pane.scrollTop = top;
+  if (resultPane.value) holdScrollDriver(resultPane.value);
+  const sideTop = Math.max(0, rowToVisual.value[target.start] * ROW_HEIGHT - 80);
+  for (const pane of sidePanes()) if (pane) pane.scrollTop = sideTop;
+  if (resultPane.value) {
+    resultPane.value.scrollTop = Math.max(0, resultLayout.value.starts[target.start] * ROW_HEIGHT - 80);
   }
 }
 
@@ -540,9 +623,47 @@ function coverAll(side: "ours" | "theirs") {
 }
 
 function applyCurrent() {
-  if (conflictCount.value > 0 || !content.value || content.value.binary) return;
+  if (props.busy || !editable.value) return;
+  if (
+    conflictCount.value > 0 &&
+    !window.confirm(`还有 ${conflictCount.value} 处冲突未通过按钮处理，将按结果区当前内容保存，确定应用？`)
+  ) {
+    return;
+  }
   emit("save", { path: props.path, content: result.value });
 }
+
+function goBack() {
+  if (dirty.value && !window.confirm("当前文件的处理结果尚未应用，返回后将丢失，确定返回？")) return;
+  emit("back");
+}
+
+function toggleIgnoreWhitespace(event: Event) {
+  const target = event.target as HTMLInputElement;
+  if (dirty.value && !window.confirm("切换「忽略空白」会重新生成结果，当前文件的处理进度将丢失，确定继续？")) {
+    target.checked = ignoreWhitespace.value;
+    return;
+  }
+  ignoreWhitespace.value = target.checked;
+}
+
+function onPageKey(event: KeyboardEvent) {
+  if (event.key !== "Escape" || event.defaultPrevented) return;
+  event.preventDefault();
+  if (completeOpen.value) {
+    completeOpen.value = false;
+  } else if (findOpen.value) {
+    findOpen.value = false;
+  } else {
+    goBack();
+  }
+}
+
+onMounted(() => window.addEventListener("keydown", onPageKey));
+onUnmounted(() => {
+  window.removeEventListener("keydown", onPageKey);
+  window.clearTimeout(scrollDriverTimer);
+});
 
 function runFind(reverse = false) {
   const el = resultEditor.value;
@@ -578,10 +699,10 @@ function cancelMerge() {
 }
 
 function toggleFold(start: number) {
-  const next = new Set(collapsedFolds.value);
+  const next = new Set(expandedFolds.value);
   if (next.has(start)) next.delete(start);
   else next.add(start);
-  collapsedFolds.value = next;
+  expandedFolds.value = next;
 }
 
 function escapeHtml(text: string) {
@@ -701,7 +822,7 @@ function renderWordHtml(segs: WordSeg[], side: "ours" | "theirs"): string {
   <Teleport to="body">
     <div class="page">
       <header class="toolbar">
-        <button type="button" class="tb-btn back-btn" title="返回冲突列表 (Esc)" @click="emit('back')">
+        <button type="button" class="tb-btn back-btn" title="返回冲突列表 (Esc)" @click="goBack">
           <Icons name="arrow-left" :size="14" />
           <span>返回</span>
         </button>
@@ -758,7 +879,7 @@ function renderWordHtml(segs: WordSeg[], side: "ours" | "theirs"): string {
           <span>Blame</span>
         </label>
         <label class="tb-check">
-          <input v-model="ignoreWhitespace" type="checkbox" />
+          <input :checked="ignoreWhitespace" type="checkbox" @change="toggleIgnoreWhitespace" />
           <span>忽略空白</span>
         </label>
         <span class="tb-count">{{ hunks.length }} 个更改</span>
@@ -766,7 +887,10 @@ function renderWordHtml(segs: WordSeg[], side: "ours" | "theirs"): string {
 
       <p v-if="error" class="err">{{ error }}</p>
       <p v-else-if="loading" class="empty-hint">正在加载三端内容和行历史…</p>
-      <div v-else-if="content?.binary" class="empty-hint">二进制文件请返回列表后使用「接受左边」或「接受右边」</div>
+      <div v-else-if="content?.binary" class="empty-hint">二进制文件请返回列表后使用「使用您的」或「使用他们的」</div>
+      <div v-else-if="content?.tooLarge" class="empty-hint">
+        文件超过 512KB，无法在此合并，请返回列表后使用「使用您的」或「使用他们的」
+      </div>
       <div v-else class="workspace">
         <section class="pane-col ours-col">
           <div class="pane-head ours-head">
@@ -777,7 +901,9 @@ function renderWordHtml(segs: WordSeg[], side: "ours" | "theirs"): string {
             <template v-for="(vr, vi) in viewerRows" :key="`o-${vi}`">
               <div v-if="vr.isFold" class="fold-bar" @click="toggleFold(vr.start)">
                 <span class="fold-icon">&#x22EE;</span>
-                <span class="fold-text">{{ vr.count }} 行未更改</span>
+                <span class="fold-text">
+                  {{ expandedFolds.has(vr.start) ? `收起 ${vr.count} 行未更改` : `${vr.count} 行未更改，点击展开` }}
+                </span>
               </div>
               <div
                 v-else
@@ -876,7 +1002,9 @@ function renderWordHtml(segs: WordSeg[], side: "ours" | "theirs"): string {
             <template v-for="(vr, vi) in viewerRows" :key="`t-${vi}`">
               <div v-if="vr.isFold" class="fold-bar" @click="toggleFold(vr.start)">
                 <span class="fold-icon">&#x22EE;</span>
-                <span class="fold-text">{{ vr.count }} 行未更改</span>
+                <span class="fold-text">
+                  {{ expandedFolds.has(vr.start) ? `收起 ${vr.count} 行未更改` : `${vr.count} 行未更改，点击展开` }}
+                </span>
               </div>
               <div
                 v-else
@@ -894,9 +1022,15 @@ function renderWordHtml(segs: WordSeg[], side: "ours" | "theirs"): string {
       </div>
 
       <footer class="foot">
-        <button type="button" class="secondary-btn" @click="emit('back')">返回列表</button>
+        <button type="button" class="secondary-btn" @click="goBack">返回列表</button>
         <span class="spacer" />
-        <button type="button" class="primary-btn apply-current" :disabled="busy || conflictCount > 0" @click="applyCurrent">
+        <button
+          type="button"
+          class="primary-btn apply-current"
+          :disabled="busy || !editable"
+          :title="conflictCount > 0 ? `还有 ${conflictCount} 处冲突未通过按钮处理` : ''"
+          @click="applyCurrent"
+        >
           <Icons name="check" :size="14" />
           应用
         </button>
@@ -1260,8 +1394,9 @@ function renderWordHtml(segs: WordSeg[], side: "ours" | "theirs"): string {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  min-height: 22px;
-  height: 22px;
+  box-sizing: border-box;
+  min-height: 18px;
+  height: 18px;
   background: var(--bg-hover);
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
@@ -1287,8 +1422,8 @@ function renderWordHtml(segs: WordSeg[], side: "ours" | "theirs"): string {
 }
 
 .fold-gutter {
-  min-height: 22px;
-  height: 22px;
+  min-height: 18px;
+  height: 18px;
 }
 
 /* ── Gutter ─────────────────────────────────────────── */

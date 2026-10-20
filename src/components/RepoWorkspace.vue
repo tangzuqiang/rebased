@@ -31,13 +31,12 @@ import {
   removeRemote,
   removeWorktree,
   renameBranch,
-  resolveConflict,
+  resolveConflicts,
   setRemoteUrl,
   setUpstream,
   unwatchRepo,
   updateBranch,
   watchRepo,
-  workingTreeDiff,
   writeResolved,
 } from "../api";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -45,8 +44,8 @@ import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { buildGraph } from "../graph";
 import { notify } from "../notify";
 import { sameRepo } from "../path";
-import type { BranchMenuAction } from "./BranchFilterList.vue";
-import type { BranchInfo, FileDiff, GitCommit, GitFile, MergeState, RecentProject, RemoteDetail, RepoInfo } from "../types";
+import BranchFilterList, { type BranchMenuAction } from "./BranchFilterList.vue";
+import type { BranchInfo, GitCommit, GitFile, MergeState, RecentProject, RemoteDetail, RepoInfo } from "../types";
 import CommitDialog from "./CommitDialog.vue";
 import ConflictsDialog from "./ConflictsDialog.vue";
 import ErrorDialog from "./ErrorDialog.vue";
@@ -57,6 +56,7 @@ import MergeDialog from "./MergeDialog.vue";
 import PullMergeConfirmDialog from "./PullMergeConfirmDialog.vue";
 import MergeEditorPage from "./MergeEditorPage.vue";
 import PushDialog from "./PushDialog.vue";
+import RevDiffDialog from "./RevDiffDialog.vue";
 import RollbackDialog from "./RollbackDialog.vue";
 import Modal from "./Modal.vue";
 import StatusBar from "./StatusBar.vue";
@@ -105,16 +105,15 @@ const pullMergeUpstream = ref("");
 const showConflicts = ref(false);
 const mergeEditPath = ref("");
 const conflictState = ref<MergeState | null>(null);
-const resolvePath = ref("");
 const loaded = ref(false);
 const logRefs = ref<string[]>([]);
 const startAmend = ref(false);
 const pushBranch = ref("");
-const branchDialog = ref<"" | "new" | "rename" | "diff">("");
+const branchDialog = ref<"" | "new" | "rename" | "diff" | "pick-compare">("");
 const actionBranch = ref<BranchInfo | null>(null);
+const branchCompare = ref<{ from: string; to: string } | null>(null);
 const actionName = ref("");
 const checkoutNewBranch = ref(true);
-const branchDiff = ref<FileDiff | null>(null);
 const branchError = ref("");
 const logLoading = ref(false);
 const actionError = ref("");
@@ -327,15 +326,18 @@ async function syncMergeState(openIfNeeded: boolean) {
   if (merge?.inProgress) {
     conflictState.value = merge;
     if (openIfNeeded) {
+      mergePrompted = true;
       showConflicts.value = true;
+    } else if (loaded.value && props.active) {
+      revealMerge();
     }
     emitMeta();
     return;
   }
   conflictState.value = null;
   showConflicts.value = false;
-  resolvePath.value = "";
   mergeEditPath.value = "";
+  mergePrompted = false;
   emitMeta();
 }
 
@@ -343,11 +345,9 @@ let bootstrapTask: Promise<void> | null = null;
 let mergePrompted = false;
 
 function revealMerge() {
-  if (mergePrompted) return;
+  if (mergePrompted || !conflictState.value?.inProgress) return;
   mergePrompted = true;
-  if (conflictState.value?.inProgress) {
-    showConflicts.value = true;
-  }
+  showConflicts.value = true;
 }
 
 function ensureLoaded(openConflicts = false) {
@@ -586,6 +586,18 @@ function localNameFromRemote(name: string) {
   return name.includes("/") ? name.slice(name.lastIndexOf("/") + 1) : name;
 }
 
+function openBranchCompare(base: string, other: string) {
+  const current = repo.value?.branch;
+  if (current && (base === current || other === current)) {
+    const target = base === current ? other : base;
+    actionBranch.value = branches.value.find((item) => item.name === target) ?? { ...actionBranch.value!, name: target };
+    branchDialog.value = "diff";
+    return;
+  }
+  branchCompare.value = { from: base, to: other };
+  branchDialog.value = "";
+}
+
 async function handleBranchAction(payload: { action: BranchMenuAction; branch: BranchInfo }) {
   actionBranch.value = payload.branch;
   branchError.value = "";
@@ -605,12 +617,15 @@ async function handleBranchAction(payload: { action: BranchMenuAction; branch: B
     return;
   }
   if (payload.action === "diff") {
-    branchDiff.value = null;
     branchDialog.value = "diff";
-    branchDiff.value = await workingTreeDiff(repoPath.value, payload.branch.name).catch((error) => {
-      branchError.value = error instanceof Error ? error.message : String(error);
-      return null;
-    });
+    return;
+  }
+  if (payload.action === "compare-current") {
+    branchDialog.value = "diff";
+    return;
+  }
+  if (payload.action === "compare-branch") {
+    branchDialog.value = "pick-compare";
     return;
   }
   if (payload.action === "push") {
@@ -756,6 +771,7 @@ async function handleMerge(theirs: string) {
     closeMergeDialog();
     if (result.status === "conflicts") {
       conflictState.value = result.state;
+      mergePrompted = true;
       showConflicts.value = true;
       emitMeta();
     }
@@ -772,29 +788,23 @@ async function handleAcceptConflict(payload: { path?: string; paths?: string[]; 
   const paths = payload.paths ?? (payload.path ? [payload.path] : []);
   if (!paths.length) return;
   await withBusy(payload.side === "ours" ? "正在接受本地版本…" : "正在接受传入版本…", async () => {
-    let state = conflictState.value;
-    for (const path of paths) {
-      state = await resolveConflict(repoPath.value, path, payload.side);
+    try {
+      conflictState.value = await resolveConflicts(repoPath.value, paths, payload.side);
+    } finally {
+      await refreshAll();
     }
-    if (state) {
-      conflictState.value = state;
-    }
-    if (paths.includes(resolvePath.value)) {
-      resolvePath.value = "";
-    }
-    await refreshAll();
   });
 }
 
-async function handleSaveResolved(payload: { path: string; content: string } | string) {
-  const path = typeof payload === "string" ? resolvePath.value : payload.path;
-  const content = typeof payload === "string" ? payload : payload.content;
-  if (!path) return;
+async function handleSaveResolved(payload: { path: string; content: string }) {
+  if (!payload.path) return;
   await withBusy("正在保存冲突解决结果…", async () => {
-    conflictState.value = await writeResolved(repoPath.value, path, content);
-    resolvePath.value = "";
-    mergeEditPath.value = "";
-    await refreshAll();
+    try {
+      conflictState.value = await writeResolved(repoPath.value, payload.path, payload.content);
+      mergeEditPath.value = "";
+    } finally {
+      await refreshAll();
+    }
   });
 }
 
@@ -803,7 +813,6 @@ async function handleContinueMerge() {
     await mergeContinue(repoPath.value);
     showConflicts.value = false;
     conflictState.value = null;
-    resolvePath.value = "";
     mergeEditPath.value = "";
     repo.value = await openRepo(repoPath.value);
     selectedHash.value = "";
@@ -818,7 +827,6 @@ async function handleAbortMerge() {
     await mergeAbort(repoPath.value);
     showConflicts.value = false;
     conflictState.value = null;
-    resolvePath.value = "";
     mergeEditPath.value = "";
     repo.value = await openRepo(repoPath.value);
     selectedHash.value = "";
@@ -1161,14 +1169,42 @@ onUnmounted(() => {
           </button>
         </template>
       </Modal>
-      <Modal v-if="branchDialog === 'diff'" title="与工作树的差异" wide @close="branchDialog = ''">
-        <p class="muted">工作树 → {{ actionBranch?.name }}</p>
-        <p v-if="branchError" class="err">{{ branchError }}</p>
-        <pre class="patch">{{ branchDiff?.binary ? "二进制差异" : (branchDiff?.patch || "没有差异") }}</pre>
-        <template #footer>
-          <button type="button" class="primary-btn" @click="branchDialog = ''">关闭</button>
-        </template>
+      <RevDiffDialog
+        v-if="branchDialog === 'diff' && actionBranch"
+        :repo-path="repoPath"
+        :title="`${repo?.branch || 'HEAD'}（工作树） ↔ ${actionBranch.name}`"
+        :from="actionBranch.name"
+        to=""
+        :from-label="actionBranch.name"
+        :to-label="`工作树（${repo?.branch || 'HEAD'}，含未提交改动）`"
+        reverse
+        @close="branchDialog = ''"
+      />
+      <Modal
+        v-if="branchDialog === 'pick-compare' && actionBranch"
+        :title="`选择与 ${actionBranch.name} 比较的分支`"
+        no-footer
+        @close="branchDialog = ''"
+      >
+        <BranchFilterList
+          :branches="branches"
+          :exclude="[actionBranch.name]"
+          :recent="recentBranches"
+          :enable-actions="false"
+          :default-open="['recent', 'local']"
+          @select="openBranchCompare(actionBranch.name, $event)"
+        />
       </Modal>
+      <RevDiffDialog
+        v-if="branchCompare"
+        :repo-path="repoPath"
+        :title="`分支差异 - ${branchCompare.from} ↔ ${branchCompare.to}`"
+        :from="branchCompare.from"
+        :to="branchCompare.to"
+        :from-label="branchCompare.from"
+        :to-label="branchCompare.to"
+        @close="branchCompare = null"
+      />
       <PullMergeConfirmDialog
         v-if="active && showPullMergeConfirm && repo && pullMergeUpstream"
         :repo="repo"
@@ -1324,17 +1360,6 @@ label input:not([type="checkbox"]) {
   background: var(--bg-input);
   border-radius: 4px;
   padding: 0 8px;
-}
-
-.patch {
-  margin: 0;
-  max-height: 480px;
-  overflow: auto;
-  padding: 8px;
-  background: var(--bg-deep);
-  font-family: Consolas, "Courier New", monospace;
-  font-size: 12px;
-  white-space: pre-wrap;
 }
 
 .err {

@@ -24,7 +24,15 @@ const pendingResolved = ref<string[]>([]);
 const visibleFiles = computed(() =>
   props.state.files.filter((file) => !pendingResolved.value.includes(file.path)),
 );
-const canMergeOne = computed(() => selected.value.length === 1 && Boolean(selected.value[0]));
+const canMergeOne = computed(() => {
+  if (selected.value.length !== 1) return false;
+  const file = visibleFiles.value.find((item) => item.path === selected.value[0]);
+  return Boolean(file && canEdit(file));
+});
+
+function canEdit(file: ConflictFile) {
+  return file.oursStatus !== "已删除" && file.theirsStatus !== "已删除";
+}
 
 const tableRows = computed(() => {
   if (!groupByDir.value) {
@@ -107,7 +115,8 @@ function selectFile(path: string, event: MouseEvent) {
 
 function openMerge(path?: string) {
   const target = path || (selected.value.length === 1 ? selected.value[0] : "");
-  if (!target) return;
+  const file = visibleFiles.value.find((item) => item.path === target);
+  if (!file || !canEdit(file)) return;
   emit("edit", target);
 }
 
@@ -156,7 +165,7 @@ function finishMerge() {
     <div class="conflicts">
       <p class="subtitle">
         正在将分支 <strong>{{ state.theirs }}</strong> 合并到分支 <strong>{{ state.ours }}</strong>
-        。单击选中文件，双击或点「合并」进入合并页；也可直接使用您的 / 他们的覆盖该文件。
+        。单击选中文件，双击或点「合并」进入合并页；也可直接使用您的 / 他们的覆盖该文件。一方已删除的文件只能选择使用您的 / 他们的。
       </p>
       <div class="list">
         <div class="head">
@@ -190,7 +199,13 @@ function finishMerge() {
                 <button type="button" class="mini" :disabled="busy" @click="accept('theirs', [row.file.path])">
                   使用他们的
                 </button>
-                <button type="button" class="mini primary" :disabled="busy" @click="openMerge(row.file.path)">
+                <button
+                  type="button"
+                  class="mini primary"
+                  :disabled="busy || !canEdit(row.file)"
+                  :title="canEdit(row.file) ? '' : '一方删除了该文件，请选择使用您的或他们的版本'"
+                  @click="openMerge(row.file.path)"
+                >
                   合并
                 </button>
               </span>

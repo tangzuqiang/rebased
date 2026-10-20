@@ -7,6 +7,8 @@ export type BranchMenuAction =
   | "checkout"
   | "new-branch"
   | "diff"
+  | "compare-current"
+  | "compare-branch"
   | "update"
   | "push"
   | "track"
@@ -275,6 +277,8 @@ defineExpose({
             <button type="button" :disabled="Boolean(menu.branch?.current)" @click="run('checkout')">签出</button>
             <button type="button" @click="run('new-branch')">从 '{{ menu.branch?.name }}' 新建分支…</button>
             <button type="button" @click="run('diff')">显示与工作树的差异</button>
+            <button type="button" :disabled="Boolean(menu.branch?.current)" @click="run('compare-current')">与当前分支比较</button>
+            <button type="button" @click="run('compare-branch')">与其他分支比较…</button>
             <button type="button" @click="run('update')">更新</button>
             <button type="button" @click="run('push')">推送…</button>
             <button type="button" @click="run('track')">跟踪分支 '{{ trackTarget }}'</button>

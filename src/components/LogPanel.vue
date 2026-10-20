@@ -4,7 +4,6 @@ import { save } from "@tauri-apps/plugin-dialog";
 import {
   checkoutRevision,
   cherryPick,
-  commitDiff,
   createBranchAt,
   createTagAt,
   dropCommit,
@@ -19,10 +18,11 @@ import {
   writeTextFile,
 } from "../api";
 import { formatLogDate } from "../path";
-import type { BranchInfo, FileDiff, GitCommit, GraphRow, RepoInfo } from "../types";
+import type { BranchInfo, GitCommit, GraphRow, RepoInfo } from "../types";
 import BranchTree from "./BranchTree.vue";
 import Icons from "./Icons.vue";
 import Modal from "./Modal.vue";
+import RevDiffDialog from "./RevDiffDialog.vue";
 import PopupMenu from "./PopupMenu.vue";
 import UserFilter from "./UserFilter.vue";
 
@@ -58,7 +58,6 @@ const dialog = ref<
   | "reset"
   | "branch"
   | "tag"
-  | "compare"
   | "rebase"
   | "confirm-revert"
   | "confirm-drop"
@@ -68,7 +67,14 @@ const dialog = ref<
 const resetMode = ref<"soft" | "mixed" | "hard">("mixed");
 const refName = ref("");
 const checkoutAfterCreate = ref(true);
-const comparePatch = ref<FileDiff | null>(null);
+const compareRange = ref<{
+  title: string;
+  from: string;
+  to: string;
+  fromLabel: string;
+  toLabel: string;
+  reverse?: boolean;
+} | null>(null);
 const rebaseItems = ref<Array<{ action: string; hash: string; message: string }>>([]);
 const acting = ref(false);
 const actionError = ref("");
@@ -180,17 +186,22 @@ function doCheckoutRev() {
   closeMenu();
 }
 
+function commitLabel(commit: GitCommit) {
+  return `${commit.shortHash} ${commit.message}`;
+}
+
 function doCompare() {
   const commit = selected.value;
   if (!commit) return;
   closeMenu();
-  dialog.value = "compare";
-  comparePatch.value = null;
-  void commitDiff(props.repo.path, commit.hash, "HEAD").then((diff) => {
-    comparePatch.value = diff;
-  }).catch((error) => {
-    actionError.value = error instanceof Error ? error.message : String(error);
-  });
+  compareRange.value = {
+    title: "与本地比较",
+    from: commit.hash,
+    to: "",
+    reverse: true,
+    fromLabel: commitLabel(commit),
+    toLabel: `工作树（${props.repo.branch || "HEAD"}，含未提交改动）`,
+  };
 }
 
 function doReset() {
@@ -350,13 +361,14 @@ function doCompareTwo() {
   const commit = selected.value;
   if (!commit || !compareHash.value) return;
   closeMenu();
-  dialog.value = "compare";
-  comparePatch.value = null;
-  void commitDiff(props.repo.path, compareHash.value, commit.hash).then((diff) => {
-    comparePatch.value = diff;
-  }).catch((error) => {
-    actionError.value = error instanceof Error ? error.message : String(error);
-  });
+  const base = props.commits.find((item) => item.hash === compareHash.value);
+  compareRange.value = {
+    title: "比较两个提交",
+    from: compareHash.value,
+    to: commit.hash,
+    fromLabel: base ? commitLabel(base) : compareHash.value.slice(0, 7),
+    toLabel: commitLabel(commit),
+  };
 }
 
 function clearCompareBase() {
@@ -518,14 +530,17 @@ defineExpose({
       </template>
     </Modal>
 
-    <Modal v-if="dialog === 'compare'" title="与本地比较" wide @close="closeDialog">
-      <p class="muted">{{ selected?.shortHash }} → HEAD</p>
-      <pre class="patch">{{ comparePatch?.binary ? "二进制差异" : comparePatch?.patch || "正在加载…" }}</pre>
-      <p v-if="actionError" class="err">{{ actionError }}</p>
-      <template #footer>
-        <button type="button" class="primary-btn" @click="closeDialog">关闭</button>
-      </template>
-    </Modal>
+    <RevDiffDialog
+      v-if="compareRange"
+      :repo-path="repo.path"
+      :title="compareRange.title"
+      :from="compareRange.from"
+      :to="compareRange.to"
+      :from-label="compareRange.fromLabel"
+      :to-label="compareRange.toLabel"
+      :reverse="compareRange.reverse"
+      @close="compareRange = null"
+    />
 
     <Modal v-if="dialog === 'rebase'" title="从此处交互变基" @close="closeDialog">
       <p>从该提交到 HEAD 的提交将按下列动作重放。</p>
@@ -717,17 +732,6 @@ defineExpose({
 
 .err {
   color: var(--danger);
-}
-
-.patch {
-  margin: 0;
-  max-height: 520px;
-  overflow: auto;
-  padding: 8px;
-  background: var(--bg-deep);
-  font-family: Consolas, "Courier New", monospace;
-  font-size: 12px;
-  white-space: pre-wrap;
 }
 
 .rebase-list,

@@ -166,8 +166,8 @@ export function mergeContinue(repo?: string) {
   return invoke<string>("merge_continue", withRepo(repo));
 }
 
-export function resolveConflict(repo: string | undefined, path: string, side: "ours" | "theirs") {
-  return invoke<MergeState>("resolve_conflict", withRepo(repo, { path, side }));
+export function resolveConflicts(repo: string | undefined, paths: string[], side: "ours" | "theirs") {
+  return invoke<MergeState>("resolve_conflict", withRepo(repo, { paths, side }));
 }
 
 export function writeResolved(repo: string | undefined, path: string, content: string) {
@@ -273,8 +273,27 @@ export function pushUpto(repo: string | undefined, remote: string, branch: strin
   return invoke<string>("push_upto", withRepo(repo, { remote, branch, hash }));
 }
 
-export function commitDiff(repo: string | undefined, from: string, to: string) {
-  return invoke<FileDiff>("commit_diff", withRepo(repo, { from, to }));
+/** `to` 为空字符串表示与工作树比较。 */
+export function revDiffFiles(repo: string | undefined, from: string, to: string) {
+  return invoke<GitFile[]>("rev_diff_files", withRepo(repo, { from, to }));
+}
+
+export function revDiffFile(
+  repo: string | undefined,
+  from: string,
+  to: string,
+  path: string,
+  untracked: boolean,
+  options: { context?: number; ignoreWhitespace?: boolean } = {},
+) {
+  return invoke<FileDiff>(
+    "rev_diff_file",
+    withRepo(repo, { from, to, path, untracked, context: options.context, ignoreWhitespace: options.ignoreWhitespace }),
+  );
+}
+
+export function writeWorktreeFile(repo: string | undefined, path: string, content: string) {
+  return invoke<void>("write_worktree_file", withRepo(repo, { path, content }));
 }
 
 export function fixupCommit(repo: string | undefined, hash: string) {
@@ -299,10 +318,6 @@ export function setUpstream(repo: string | undefined, local: string, upstream: s
 
 export function updateBranch(repo: string | undefined, name: string) {
   return invoke<string>("update_branch", withRepo(repo, { name }));
-}
-
-export function workingTreeDiff(repo: string | undefined, rev: string) {
-  return invoke<FileDiff>("working_tree_diff", withRepo(repo, { rev }));
 }
 
 export function listWorktree(repo?: string) {

@@ -155,6 +155,7 @@ export interface MergeFileContent {
   base: string;
   theirs: string;
   binary: boolean;
+  tooLarge?: boolean;
   oursBlame?: BlameLine[];
   baseBlame?: BlameLine[];
   theirsBlame?: BlameLine[];

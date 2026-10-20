@@ -169,6 +169,11 @@ fn with_index_lock_retry(
 }
 
 fn exec_git(repo: &Path, args: &[&str]) -> Result<(bool, String, String), String> {
+    let (ok, stdout, stderr) = exec_git_raw(repo, args)?;
+    Ok((ok, decode(&stdout), decode(&stderr)))
+}
+
+fn exec_git_raw(repo: &Path, args: &[&str]) -> Result<(bool, Vec<u8>, Vec<u8>), String> {
     let mut cmd = Command::new("git");
     cmd.arg("-c")
         .arg("core.quotepath=false")
@@ -198,11 +203,7 @@ fn exec_git(repo: &Path, args: &[&str]) -> Result<(bool, String, String), String
     let output = cmd
         .output()
         .map_err(|e| format!("无法执行 git，请确认已安装并加入 PATH：{e}"))?;
-    Ok((
-        output.status.success(),
-        decode(&output.stdout),
-        decode(&output.stderr),
-    ))
+    Ok((output.status.success(), output.stdout, output.stderr))
 }
 
 fn decode(bytes: &[u8]) -> String {
@@ -806,7 +807,7 @@ fn untracked_diff(repo: &Path, path: &str) -> Result<FileDiff, String> {
             patch: String::new(),
         });
     }
-    let text = String::from_utf8_lossy(&bytes);
+    let text = decode_text(&bytes).0;
     let lines: Vec<&str> = text.lines().collect();
     let mut patch = format!(
         "--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
@@ -900,6 +901,7 @@ pub struct MergeFileContent {
     pub base: String,
     pub theirs: String,
     pub binary: bool,
+    pub too_large: bool,
     pub ours_blame: Vec<BlameLine>,
     pub base_blame: Vec<BlameLine>,
     pub theirs_blame: Vec<BlameLine>,
@@ -1015,72 +1017,66 @@ pub fn merge_file(repo: &Path, theirs: &str, path: &str) -> Result<MergeFileCont
     let base = run_git(repo, &["merge-base", "HEAD", theirs])?
         .trim()
         .to_string();
-    let ours = show_file(repo, "HEAD", path);
-    let base_text = show_file(repo, &base, path);
-    let theirs_text = show_file(repo, theirs, path);
-    let binary = is_binary(&ours) || is_binary(&base_text) || is_binary(&theirs_text);
-    Ok(MergeFileContent {
-        path: path.to_string(),
-        ours: if binary { String::new() } else { ours },
-        base: if binary { String::new() } else { base_text },
-        theirs: if binary { String::new() } else { theirs_text },
-        binary,
-        ours_blame: if binary {
-            Vec::new()
-        } else {
-            blame_lines(repo, "HEAD", path)
-        },
-        base_blame: if binary {
-            Vec::new()
-        } else {
-            blame_lines(repo, &base, path)
-        },
-        theirs_blame: if binary {
-            Vec::new()
-        } else {
-            blame_lines(repo, theirs, path)
-        },
-    })
+    let ours = show_blob(repo, "HEAD", path);
+    let base_blob = show_blob(repo, &base, path);
+    let theirs_blob = show_blob(repo, theirs, path);
+    Ok(three_way_content(
+        repo,
+        path,
+        [ours, base_blob, theirs_blob],
+        ["HEAD", &base, theirs],
+    ))
 }
 
 pub fn conflict_file(repo: &Path, path: &str) -> Result<MergeFileContent, String> {
-    let staged = show_file(repo, ":2", path);
-    let ours = if staged.is_empty() {
-        show_file(repo, "HEAD", path)
-    } else {
-        staged
-    };
-    let base_text = show_file(repo, ":1", path);
-    let theirs_text = show_file(repo, ":3", path);
-    let binary = is_binary(&ours) || is_binary(&base_text) || is_binary(&theirs_text);
+    let ours = show_blob(repo, ":2", path).or_else(|| show_blob(repo, "HEAD", path));
+    let base_blob = show_blob(repo, ":1", path);
+    let theirs_blob = show_blob(repo, ":3", path);
     let theirs_rev = run_git(repo, &["rev-parse", "MERGE_HEAD"])
         .map(|item| item.trim().to_string())
         .unwrap_or_else(|_| "MERGE_HEAD".to_string());
     let base_rev = run_git(repo, &["merge-base", "HEAD", &theirs_rev])
         .map(|item| item.trim().to_string())
         .unwrap_or_default();
-    Ok(MergeFileContent {
+    Ok(three_way_content(
+        repo,
+        path,
+        [ours, base_blob, theirs_blob],
+        ["HEAD", &base_rev, &theirs_rev],
+    ))
+}
+
+fn three_way_content(
+    repo: &Path,
+    path: &str,
+    blobs: [Option<Vec<u8>>; 3],
+    revs: [&str; 3],
+) -> MergeFileContent {
+    let binary = blobs.iter().flatten().any(|bytes| bytes.contains(&0));
+    let too_large = blobs.iter().flatten().any(|bytes| bytes.len() > MAX_MERGE_BYTES);
+    let readable = !binary && !too_large;
+    let [ours, base, theirs] = blobs.map(|blob| match blob {
+        Some(bytes) if readable => decode_text(&bytes).0,
+        _ => String::new(),
+    });
+    let [ours_blame, base_blame, theirs_blame] = revs.map(|rev| {
+        if readable && !rev.is_empty() {
+            blame_lines(repo, rev, path)
+        } else {
+            Vec::new()
+        }
+    });
+    MergeFileContent {
         path: path.to_string(),
-        ours: if binary { String::new() } else { ours },
-        base: if binary { String::new() } else { base_text },
-        theirs: if binary { String::new() } else { theirs_text },
+        ours,
+        base,
+        theirs,
         binary,
-        ours_blame: if binary {
-            Vec::new()
-        } else {
-            blame_lines(repo, "HEAD", path)
-        },
-        base_blame: if binary || base_rev.is_empty() {
-            Vec::new()
-        } else {
-            blame_lines(repo, &base_rev, path)
-        },
-        theirs_blame: if binary {
-            Vec::new()
-        } else {
-            blame_lines(repo, &theirs_rev, path)
-        },
-    })
+        too_large,
+        ours_blame,
+        base_blame,
+        theirs_blame,
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -1163,7 +1159,7 @@ pub fn merge_branch(repo: &Path, theirs: &str) -> Result<MergeOutcome, String> {
     }
     let (ok, stdout, stderr) = exec_git(repo, &["merge", "--no-edit", theirs])?;
     let combined = format!("{stdout}\n{stderr}");
-    if is_conflict_output(&combined) || merge_in_progress(repo) {
+    if merge_in_progress(repo) {
         return Ok(MergeOutcome {
             status: "conflicts".to_string(),
             message: "合并产生冲突，请处理冲突文件".to_string(),
@@ -1221,38 +1217,78 @@ pub fn merge_state(repo: &Path) -> Result<MergeState, String> {
     })
 }
 
-pub fn resolve_conflict(repo: &Path, path: &str, side: &str) -> Result<MergeState, String> {
-    let actual = display_to_path(path);
+pub fn resolve_conflicts(repo: &Path, paths: &[String], side: &str) -> Result<MergeState, String> {
+    if side != "ours" && side != "theirs" {
+        return Err("未知的解决方式".to_string());
+    }
     let files = conflict_files(repo)?;
-    let file = files.iter().find(|item| item.path == actual);
-    let ours_deleted = file.is_some_and(|item| item.ours_status == "已删除");
-    let theirs_deleted = file.is_some_and(|item| item.theirs_status == "已删除");
-
-    match side {
-        "ours" if ours_deleted => {
-            run_git(repo, &["rm", "-f", "--", &actual])?;
-        }
-        "theirs" if theirs_deleted => {
-            run_git(repo, &["rm", "-f", "--", &actual])?;
-        }
-        "ours" | "theirs" => {
-            run_git(repo, &["checkout", &format!("--{side}"), "--", &actual])?;
-            run_git(repo, &["add", "--", &actual])?;
-        }
-        _ => return Err("未知的解决方式".to_string()),
+    for path in paths {
+        let actual = display_to_path(path);
+        let Some(file) = files.iter().find(|item| item.path == actual) else {
+            continue;
+        };
+        let deleted = if side == "ours" {
+            file.ours_status == "已删除"
+        } else {
+            file.theirs_status == "已删除"
+        };
+        let result = if deleted {
+            run_git(repo, &["rm", "-f", "--", &actual]).map(|_| ())
+        } else {
+            run_git(repo, &["checkout", &format!("--{side}"), "--", &actual])
+                .and_then(|_| run_git(repo, &["add", "--", &actual]))
+                .map(|_| ())
+        };
+        result.map_err(|err| format!("{actual}：{err}"))?;
     }
     merge_state(repo)
 }
 
 pub fn write_resolved(repo: &Path, path: &str, content: &str) -> Result<MergeState, String> {
     let actual = display_to_path(path);
+    let reference = show_blob(repo, ":2", &actual)
+        .or_else(|| show_blob(repo, "HEAD", &actual))
+        .or_else(|| show_blob(repo, ":3", &actual))
+        .or_else(|| std::fs::read(repo.join(&actual)).ok());
+    let format = reference
+        .map(|bytes| decode_text(&bytes).1)
+        .unwrap_or_default();
     let full = repo.join(&actual);
     if let Some(parent) = full.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("无法创建目录：{e}"))?;
     }
-    std::fs::write(&full, content).map_err(|e| format!("写入解决结果失败：{e}"))?;
+    std::fs::write(&full, encode_text(content, format)).map_err(|e| format!("写入解决结果失败：{e}"))?;
     run_git(repo, &["add", "--", &actual])?;
     merge_state(repo)
+}
+
+/// 用比较面板里拼好的内容覆盖工作树文件，沿用原文件的编码、BOM、换行符和末尾换行。
+pub fn write_worktree_file(repo: &Path, path: &str, content: &str) -> Result<(), String> {
+    let relative = Path::new(path);
+    if path.trim().is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_) | std::path::Component::CurDir))
+    {
+        return Err(format!("非法的文件路径：{path}"));
+    }
+    let full = repo.join(relative);
+    let (format, trailing_newline) = match std::fs::read(&full) {
+        Ok(bytes) => (decode_text(&bytes).1, bytes.is_empty() || bytes.ends_with(b"\n")),
+        Err(_) => (TextFormat::default(), true),
+    };
+    let mut text = content.replace("\r\n", "\n");
+    while text.ends_with('\n') {
+        text.pop();
+    }
+    if trailing_newline && !text.is_empty() {
+        text.push('\n');
+    }
+    if let Some(parent) = full.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("无法创建目录：{e}"))?;
+    }
+    std::fs::write(&full, encode_text(&text, format)).map_err(|e| format!("写入文件失败：{e}"))
 }
 
 fn merge_in_progress(repo: &Path) -> bool {
@@ -1355,14 +1391,6 @@ fn unmerged_labels(ours: char, theirs: char) -> (String, String) {
     }
 }
 
-fn is_conflict_output(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    lower.contains("conflict")
-        || lower.contains("merge conflict")
-        || text.contains("冲突")
-        || text.contains("Automatic merge failed")
-}
-
 
 fn name_status_map(repo: &Path, from: &str, to: &str) -> Result<std::collections::HashMap<String, String>, String> {
     let raw = run_git(repo, &["diff", "--name-status", "--no-renames", from, to])?;
@@ -1383,20 +1411,57 @@ fn exists_at(repo: &Path, rev: &str, path: &str) -> bool {
     run_git(repo, &["cat-file", "-e", &format!("{rev}:{path}")]).is_ok()
 }
 
-fn show_file(repo: &Path, rev: &str, path: &str) -> String {
-    match run_git(repo, &["show", &format!("{rev}:{path}")]) {
-        Ok(text) => {
-            if text.len() > 512 * 1024 {
-                return "（文件过大，已省略内容）".to_string();
-            }
-            text
-        }
-        Err(_) => String::new(),
+const MAX_MERGE_BYTES: usize = 512 * 1024;
+
+fn show_blob(repo: &Path, rev: &str, path: &str) -> Option<Vec<u8>> {
+    match exec_git_raw(repo, &["show", &format!("{rev}:{path}")]) {
+        Ok((true, bytes, _)) => Some(bytes),
+        _ => None,
     }
 }
 
-fn is_binary(text: &str) -> bool {
-    text.contains('\0')
+#[derive(Clone, Copy, Default)]
+struct TextFormat {
+    bom: bool,
+    gbk: bool,
+    crlf: bool,
+}
+
+fn decode_text(bytes: &[u8]) -> (String, TextFormat) {
+    let bom = bytes.starts_with(&[0xEF, 0xBB, 0xBF]);
+    let body = if bom { &bytes[3..] } else { bytes };
+    let (text, gbk) = match std::str::from_utf8(body) {
+        Ok(text) => (text.to_string(), false),
+        Err(_) => {
+            let (text, had_errors) = encoding_rs::GBK.decode_without_bom_handling(body);
+            if had_errors {
+                (String::from_utf8_lossy(body).into_owned(), false)
+            } else {
+                (text.into_owned(), true)
+            }
+        }
+    };
+    let crlf = text.contains("\r\n");
+    (text, TextFormat { bom, gbk, crlf })
+}
+
+fn encode_text(content: &str, format: TextFormat) -> Vec<u8> {
+    let normalized = content.replace("\r\n", "\n");
+    let text = if format.crlf {
+        normalized.replace('\n', "\r\n")
+    } else {
+        normalized
+    };
+    let mut out = Vec::with_capacity(text.len() + 3);
+    if format.bom {
+        out.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    }
+    if format.gbk {
+        out.extend_from_slice(&encoding_rs::GBK.encode(&text).0);
+    } else {
+        out.extend_from_slice(text.as_bytes());
+    }
+    out
 }
 
 fn localize_git_error(err: &str) -> String {
@@ -1564,14 +1629,147 @@ pub fn update_branch(repo: &Path, name: &str) -> Result<String, String> {
     Ok(format!("已更新分支 {name}"))
 }
 
-pub fn working_tree_diff(repo: &Path, rev: &str) -> Result<FileDiff, String> {
-    let patch = run_git(repo, &["diff", "-U3", rev])?;
-    let binary = patch.contains("Binary files") || patch.contains("二进制文件") || is_binary(&patch);
-    Ok(FileDiff {
-        path: format!("工作树..{rev}"),
+const MAX_PATCH_LINES: usize = 20_000;
+
+/// `to` 为空表示与工作树（含未提交和未跟踪的改动）比较。
+pub fn rev_diff_files(repo: &Path, from: &str, to: &str) -> Result<Vec<GitFile>, String> {
+    if from.trim().is_empty() {
+        return Err("缺少比较的起点".to_string());
+    }
+    let mut args = vec!["diff", "--name-status", "-M", "-z", from];
+    if !to.is_empty() {
+        args.push(to);
+    }
+    let raw = run_git(repo, &args)?;
+    let mut tokens = raw.split('\0').filter(|item| !item.is_empty());
+    let mut files = Vec::new();
+    while let Some(code) = tokens.next() {
+        let letter = code.chars().next().unwrap_or('M');
+        let Some(first) = tokens.next() else { break };
+        let path = if matches!(letter, 'R' | 'C') {
+            match tokens.next() {
+                Some(second) => format!("{first} → {second}"),
+                None => first.to_string(),
+            }
+        } else {
+            first.to_string()
+        };
+        files.push(GitFile {
+            path,
+            status: status_letter(letter),
+            staged: false,
+            untracked: false,
+        });
+    }
+    if to.is_empty() {
+        let others = run_git(repo, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+        for path in others.split('\0').filter(|item| !item.is_empty()) {
+            if let Some(existing) = files.iter_mut().find(|file| file.path == path) {
+                existing.status = "M".to_string();
+                existing.untracked = true;
+                continue;
+            }
+            files.push(GitFile {
+                path: path.to_string(),
+                status: "A".to_string(),
+                staged: false,
+                untracked: true,
+            });
+        }
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(files)
+}
+
+pub fn rev_diff_file(
+    repo: &Path,
+    from: &str,
+    to: &str,
+    path: &str,
+    untracked: bool,
+    context: u32,
+    ignore_whitespace: bool,
+) -> Result<FileDiff, String> {
+    let (old_path, new_path) = match path.split_once(" → ") {
+        Some((old, new)) => (old.to_string(), new.to_string()),
+        None => (path.to_string(), path.to_string()),
+    };
+    let unified = format!("-U{}", context.min(1_000_000));
+    let bytes = if untracked {
+        match show_blob(repo, from, &new_path) {
+            Some(base) => untracked_against_blob(repo, &new_path, &base, &unified, ignore_whitespace)?,
+            None => return untracked_diff(repo, &new_path).map(|diff| truncate_patch(diff)),
+        }
+    } else {
+        let mut args = vec!["diff", unified.as_str(), "-M"];
+        if ignore_whitespace {
+            args.push("-w");
+        }
+        args.push(from);
+        if !to.is_empty() {
+            args.push(to);
+        }
+        args.push("--");
+        args.push(&old_path);
+        if new_path != old_path {
+            args.push(&new_path);
+        }
+        let (ok, stdout, stderr) = exec_git_raw(repo, &args)?;
+        if !ok {
+            return Err(localize_git_error(decode(&stderr).trim()));
+        }
+        stdout
+    };
+    let patch = decode_text(&bytes).0;
+    let binary = patch.lines().any(|line| line.starts_with("Binary files ") || line.starts_with("GIT binary patch"));
+    Ok(truncate_patch(FileDiff {
+        path: new_path,
         binary,
         patch: if binary { String::new() } else { patch },
-    })
+    }))
+}
+
+fn untracked_against_blob(
+    repo: &Path,
+    path: &str,
+    base: &[u8],
+    unified: &str,
+    ignore_whitespace: bool,
+) -> Result<Vec<u8>, String> {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let tmp = std::env::temp_dir().join(format!("rebased-base-{}-{unique}", std::process::id()));
+    std::fs::write(&tmp, base).map_err(|e| format!("无法写入临时文件：{e}"))?;
+    let tmp_arg = tmp.to_string_lossy().to_string();
+    let mut args = vec!["diff", "--no-index", unified];
+    if ignore_whitespace {
+        args.push("-w");
+    }
+    args.extend(["--", tmp_arg.as_str(), path]);
+    let result = exec_git_raw(repo, &args);
+    let _ = std::fs::remove_file(&tmp);
+    let (_, stdout, stderr) = result?;
+    if stdout.is_empty() && !stderr.is_empty() {
+        return Err(localize_git_error(decode(&stderr).trim()));
+    }
+    Ok(stdout)
+}
+
+fn truncate_patch(mut diff: FileDiff) -> FileDiff {
+    let total = diff.patch.lines().count();
+    if total > MAX_PATCH_LINES {
+        let mut kept: String = diff
+            .patch
+            .lines()
+            .take(MAX_PATCH_LINES)
+            .collect::<Vec<_>>()
+            .join("\n");
+        kept.push_str(&format!("\n@@ -0 +0 @@ 差异过大，仅显示前 {MAX_PATCH_LINES} 行（共 {total} 行）"));
+        diff.patch = kept;
+    }
+    diff
 }
 
 fn branch_upstream(repo: &Path, name: &str) -> String {
@@ -2109,16 +2307,6 @@ pub fn push_upto(repo: &Path, remote: &str, branch: &str, hash: &str) -> Result<
     )
 }
 
-pub fn commit_diff(repo: &Path, from: &str, to: &str) -> Result<FileDiff, String> {
-    let patch = run_git(repo, &["diff", "-U3", from, to])?;
-    let binary = patch.contains("Binary files") || patch.contains("二进制文件") || is_binary(&patch);
-    Ok(FileDiff {
-        path: format!("{from}..{to}"),
-        binary,
-        patch: if binary { String::new() } else { patch },
-    })
-}
-
 pub fn squash_commit(repo: &Path, hash: &str) -> Result<String, String> {
     let parent = run_git(repo, &["rev-parse", &format!("{hash}^")])
         .map_err(|_| "无法压缩根提交".to_string())?;
@@ -2295,5 +2483,193 @@ mod checkout_tests {
         );
 
         std::fs::remove_dir_all(root).expect("remove fixture");
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::{
+        conflict_file, merge_branch, merge_state, resolve_conflicts, rev_diff_file, rev_diff_files, write_resolved,
+        write_worktree_file,
+    };
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git should run");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let repo = std::env::temp_dir().join(format!("rebased-merge-{name}-{unique}"));
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Rebased Test"]);
+        git(&repo, &["config", "user.email", "rebased@example.test"]);
+        git(&repo, &["config", "core.autocrlf", "false"]);
+        repo
+    }
+
+    fn commit_file(repo: &Path, path: &str, bytes: &[u8], message: &str) {
+        let full = repo.join(path);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).expect("create parent");
+        }
+        std::fs::write(full, bytes).expect("write fixture");
+        git(repo, &["add", "--", path]);
+        git(repo, &["commit", "-m", message]);
+    }
+
+    #[test]
+    fn merge_touching_conflict_named_file_is_not_a_conflict() {
+        let repo = fixture("named");
+        commit_file(&repo, "src/ConflictsDialog.vue", b"a\n", "initial");
+        git(&repo, &["checkout", "-b", "feature"]);
+        commit_file(&repo, "src/ConflictsDialog.vue", b"b\n", "change");
+        git(&repo, &["checkout", "main"]);
+
+        let outcome = merge_branch(&repo, "feature").expect("merge should succeed");
+        assert_eq!(outcome.status, "ok");
+        assert!(!outcome.state.in_progress);
+
+        std::fs::remove_dir_all(repo).expect("remove fixture");
+    }
+
+    #[test]
+    fn write_resolved_keeps_gbk_and_crlf() {
+        let repo = fixture("format");
+        let gbk = |text: &str| encoding_rs::GBK.encode(text).0.into_owned();
+        commit_file(&repo, "a.txt", &gbk("标题\r\n原始\r\n"), "initial");
+        git(&repo, &["checkout", "-b", "feature"]);
+        commit_file(&repo, "a.txt", &gbk("标题\r\n传入\r\n"), "theirs");
+        git(&repo, &["checkout", "main"]);
+        commit_file(&repo, "a.txt", &gbk("标题\r\n本地\r\n"), "ours");
+
+        let outcome = merge_branch(&repo, "feature").expect("merge should run");
+        assert_eq!(outcome.status, "conflicts");
+
+        let content = conflict_file(&repo, "a.txt").expect("conflict file");
+        assert_eq!(content.ours, "标题\r\n本地\r\n");
+        assert_eq!(content.theirs, "标题\r\n传入\r\n");
+
+        let state = write_resolved(&repo, "a.txt", "标题\n本地\n传入\n").expect("write resolved");
+        assert!(state.files.is_empty());
+        let written = std::fs::read(repo.join("a.txt")).expect("read result");
+        assert_eq!(written, gbk("标题\r\n本地\r\n传入\r\n"));
+
+        std::fs::remove_dir_all(repo).expect("remove fixture");
+    }
+
+    #[test]
+    fn large_conflict_file_is_flagged() {
+        let repo = fixture("large");
+        let big = |tail: &str| format!("{}{tail}\n", "x\n".repeat(300 * 1024));
+        commit_file(&repo, "big.txt", big("base").as_bytes(), "initial");
+        git(&repo, &["checkout", "-b", "feature"]);
+        commit_file(&repo, "big.txt", big("theirs").as_bytes(), "theirs");
+        git(&repo, &["checkout", "main"]);
+        commit_file(&repo, "big.txt", big("ours").as_bytes(), "ours");
+        merge_branch(&repo, "feature").expect("merge should run");
+
+        let content = conflict_file(&repo, "big.txt").expect("conflict file");
+        assert!(content.too_large);
+        assert!(content.ours.is_empty());
+
+        std::fs::remove_dir_all(repo).expect("remove fixture");
+    }
+
+    #[test]
+    fn resolve_conflicts_handles_batch_with_deletion() {
+        let repo = fixture("batch");
+        commit_file(&repo, "keep.txt", b"base\n", "keep");
+        commit_file(&repo, "gone.txt", b"base\n", "gone");
+        git(&repo, &["checkout", "-b", "feature"]);
+        commit_file(&repo, "keep.txt", b"theirs\n", "theirs keep");
+        git(&repo, &["rm", "gone.txt"]);
+        git(&repo, &["commit", "-m", "theirs delete"]);
+        git(&repo, &["checkout", "main"]);
+        commit_file(&repo, "keep.txt", b"ours\n", "ours keep");
+        commit_file(&repo, "gone.txt", b"ours\n", "ours gone");
+        merge_branch(&repo, "feature").expect("merge should run");
+        assert_eq!(merge_state(&repo).expect("state").files.len(), 2);
+
+        let paths = vec!["keep.txt".to_string(), "gone.txt".to_string()];
+        let state = resolve_conflicts(&repo, &paths, "theirs").expect("resolve");
+        assert!(state.files.is_empty());
+        assert_eq!(std::fs::read(repo.join("keep.txt")).expect("read keep"), b"theirs\n");
+        assert!(!repo.join("gone.txt").exists());
+
+        std::fs::remove_dir_all(repo).expect("remove fixture");
+    }
+
+    #[test]
+    fn rev_diff_lists_files_against_working_tree() {
+        let repo = fixture("revdiff");
+        let gbk = |text: &str| encoding_rs::GBK.encode(text).0.into_owned();
+        commit_file(&repo, "keep.txt", b"same\n", "keep");
+        commit_file(&repo, "edit.txt", b"one\n", "edit");
+        commit_file(&repo, "old/name.txt", b"line1\nline2\nline3\nline4\n", "rename source");
+        commit_file(&repo, "cn.txt", &gbk("中文\n"), "gbk");
+        git(&repo, &["branch", "test"]);
+        commit_file(&repo, "edit.txt", b"two\n", "edit on main");
+        std::fs::create_dir_all(repo.join("new")).expect("create rename target");
+        git(&repo, &["mv", "old/name.txt", "new/name.txt"]);
+        git(&repo, &["commit", "-m", "rename"]);
+        commit_file(&repo, "bin.dat", &[0, 1, 2, 3], "binary");
+        std::fs::write(repo.join("cn.txt"), gbk("中文\n改动\n")).expect("dirty edit");
+        std::fs::write(repo.join("fresh.txt"), b"brand new\n").expect("untracked");
+
+        let files = rev_diff_files(&repo, "test", "").expect("list");
+        let summary: Vec<(String, String, bool)> = files
+            .iter()
+            .map(|file| (file.path.clone(), file.status.clone(), file.untracked))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("bin.dat".to_string(), "A".to_string(), false),
+                ("cn.txt".to_string(), "M".to_string(), false),
+                ("edit.txt".to_string(), "M".to_string(), false),
+                ("fresh.txt".to_string(), "A".to_string(), true),
+                ("old/name.txt → new/name.txt".to_string(), "R".to_string(), false),
+            ]
+        );
+
+        let cn = rev_diff_file(&repo, "test", "", "cn.txt", false, 3, false).expect("cn diff");
+        assert!(cn.patch.contains("+改动"), "patch: {}", cn.patch);
+        let fresh = rev_diff_file(&repo, "test", "", "fresh.txt", true, 3, false).expect("untracked diff");
+        assert!(fresh.patch.contains("+brand new"));
+        let renamed =
+            rev_diff_file(&repo, "test", "", "old/name.txt → new/name.txt", false, 3, false).expect("rename diff");
+        assert!(!renamed.binary);
+        let full = rev_diff_file(&repo, "test", "", "edit.txt", false, 1_000_000, true).expect("full context");
+        assert!(full.patch.contains("-one") && full.patch.contains("+two"));
+        let bin = rev_diff_file(&repo, "test", "", "bin.dat", false, 3, false).expect("binary diff");
+        assert!(bin.binary);
+
+        std::fs::write(repo.join("crlf.txt"), gbk("甲\r\n乙\r\n")).expect("crlf file");
+        write_worktree_file(&repo, "crlf.txt", "甲\n丙").expect("write back");
+        assert_eq!(std::fs::read(repo.join("crlf.txt")).expect("read back"), gbk("甲\r\n丙\r\n"));
+        assert!(write_worktree_file(&repo, "../escape.txt", "x").is_err());
+
+        let committed = rev_diff_files(&repo, "test", "HEAD").expect("commit range");
+        assert!(committed.iter().all(|file| file.path != "fresh.txt" && file.path != "cn.txt"));
+
+        std::fs::remove_dir_all(repo).expect("remove fixture");
     }
 }
