@@ -191,6 +191,13 @@ export interface PullOutcome {
   upstream: string;
 }
 
+export interface SyncOutcome {
+  status: "ok" | "merged" | "conflicts";
+  message: string;
+  upstream: string;
+  conflicts: string[];
+}
+
 export type DiffKind = "same" | "changed" | "added" | "deleted" | "conflict" | "empty";
 
 export interface Diff3Row {

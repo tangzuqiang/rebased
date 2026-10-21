@@ -206,6 +206,7 @@ onMounted(async () => {
       :tabs="tabs"
       @close="showBatchGit = false"
       @updated="updateMeta"
+      @resolve="showBatchGit = false; selectTab($event)"
     />
     <WelcomeView
       v-if="!tabs.length"

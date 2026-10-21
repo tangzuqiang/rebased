@@ -763,6 +763,124 @@ pub fn push(repo: &Path) -> Result<String, String> {
     run_git(repo, &["push"])
 }
 
+/// 批量同步的结果：ok 直接完成，merged 自动合并后完成，conflicts 合并冲突待处理。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncOutcome {
+    pub status: String,
+    pub message: String,
+    pub upstream: String,
+    pub conflicts: Vec<String>,
+}
+
+fn sync_outcome(status: &str, message: String, upstream: String, conflicts: Vec<String>) -> SyncOutcome {
+    SyncOutcome {
+        status: status.to_string(),
+        message,
+        upstream,
+        conflicts,
+    }
+}
+
+/// 合并上游；产生冲突时保留合并状态交给用户处理。
+fn merge_upstream(repo: &Path, upstream: &str) -> Result<Option<SyncOutcome>, String> {
+    let outcome = merge_branch(repo, upstream)?;
+    if outcome.status == "conflicts" {
+        let conflicts: Vec<String> = outcome.state.files.into_iter().map(|file| file.path).collect();
+        return Ok(Some(sync_outcome(
+            "conflicts",
+            format!("自动合并 {upstream} 产生 {} 个冲突文件，需要手动处理", conflicts.len()),
+            upstream.to_string(),
+            conflicts,
+        )));
+    }
+    Ok(None)
+}
+
+fn current_upstream(repo: &Path) -> Result<String, String> {
+    let upstream = branch_upstream(repo, &current_branch(repo));
+    if upstream.is_empty() {
+        Err("当前分支没有设置上游，无法自动合并远程更新".to_string())
+    } else {
+        Ok(upstream)
+    }
+}
+
+/// 拉取：能快进就快进；与远程分叉时自动合并上游，只有冲突才停下。
+pub fn sync_pull(repo: &Path) -> Result<SyncOutcome, String> {
+    let (ok, stdout, stderr) = exec_git(repo, &["pull", "--ff-only"])?;
+    let combined = format!("{stdout}\n{stderr}");
+    if ok {
+        return Ok(sync_outcome("ok", combined.trim().to_string(), String::new(), Vec::new()));
+    }
+    let lower = combined.to_ascii_lowercase();
+    if !(lower.contains("not possible to fast-forward") || lower.contains("divergent branches")) {
+        return Err(localize_git_error(combined.trim()));
+    }
+    let upstream = current_upstream(repo)?;
+    if let Some(conflict) = merge_upstream(repo, &upstream)? {
+        return Ok(conflict);
+    }
+    Ok(sync_outcome(
+        "merged",
+        format!("本地与远程分叉，已自动合并 {upstream}"),
+        upstream,
+        Vec::new(),
+    ))
+}
+
+fn is_push_rejected(lower: &str) -> bool {
+    lower.contains("rejected")
+        && (lower.contains("non-fast-forward") || lower.contains("fetch first") || lower.contains("behind"))
+}
+
+pub fn sync_push(repo: &Path) -> Result<SyncOutcome, String> {
+    sync_push_to(repo, "", "")
+}
+
+/// 推送：远程有新提交被拒绝时，先获取并自动合并目标分支再推送；有冲突则不推送。
+/// remote 为空时推送到当前分支的上游。
+pub fn sync_push_to(repo: &Path, remote: &str, branch: &str) -> Result<SyncOutcome, String> {
+    let (remote, branch) = (remote.trim(), branch.trim());
+    let args: Vec<&str> = match (remote.is_empty(), branch.is_empty()) {
+        (true, _) => vec!["push"],
+        (false, true) => vec!["push", remote],
+        (false, false) => vec!["push", "-u", remote, branch],
+    };
+    let (ok, stdout, stderr) = exec_git(repo, &args)?;
+    let combined = format!("{stdout}\n{stderr}");
+    if ok {
+        return Ok(sync_outcome("ok", combined.trim().to_string(), String::new(), Vec::new()));
+    }
+    if !is_push_rejected(&combined.to_ascii_lowercase()) {
+        return Err(localize_git_error(combined.trim()));
+    }
+    let upstream = if !remote.is_empty() && !branch.is_empty() {
+        format!("{remote}/{branch}")
+    } else {
+        current_upstream(repo)?
+    };
+    let fetch_remote = if remote.is_empty() {
+        upstream.split('/').next().unwrap_or("origin").to_string()
+    } else {
+        remote.to_string()
+    };
+    run_git(repo, &["fetch", &fetch_remote])?;
+    if let Some(conflict) = merge_upstream(repo, &upstream)? {
+        return Ok(conflict);
+    }
+    let (ok, stdout, stderr) = exec_git(repo, &args)?;
+    if !ok {
+        return Err(localize_git_error(format!("{stdout}\n{stderr}").trim()));
+    }
+    Ok(sync_outcome(
+        "merged",
+        format!("远程有新提交，已自动合并 {upstream} 后推送"),
+        upstream,
+        Vec::new(),
+    ))
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileDiff {
@@ -2533,6 +2651,60 @@ mod merge_tests {
         std::fs::write(full, bytes).expect("write fixture");
         git(repo, &["add", "--", path]);
         git(repo, &["commit", "-m", message]);
+    }
+
+    fn remote_pair(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let seed = fixture(&format!("{name}-seed"));
+        commit_file(&seed, "shared.txt", b"base\n", "base");
+        let root = seed.with_extension("pair");
+        std::fs::create_dir_all(&root).expect("create pair root");
+        git(&root, &["clone", "--bare", seed.to_str().unwrap(), "remote.git"]);
+        std::fs::remove_dir_all(&seed).expect("remove seed");
+        let clone = |dir: &str| {
+            git(&root, &["clone", "remote.git", dir]);
+            let path = root.join(dir);
+            git(&path, &["config", "user.name", "Rebased Test"]);
+            git(&path, &["config", "user.email", "rebased@example.test"]);
+            git(&path, &["config", "core.autocrlf", "false"]);
+            path
+        };
+        let mine = clone("mine");
+        let other = clone("other");
+        (root, mine, other)
+    }
+
+    #[test]
+    fn sync_pull_and_push_auto_merge_diverged_branches() {
+        let (root, mine, other) = remote_pair("sync");
+        commit_file(&other, "remote.txt", b"remote\n", "remote side");
+        git(&other, &["push"]);
+        commit_file(&mine, "local.txt", b"local\n", "local side");
+
+        let pulled = super::sync_pull(&mine).expect("pull");
+        assert_eq!(pulled.status, "merged", "{}", pulled.message);
+        assert!(mine.join("remote.txt").exists() && mine.join("local.txt").exists());
+
+        commit_file(&other, "remote2.txt", b"r2\n", "remote again");
+        git(&other, &["push"]);
+        commit_file(&mine, "local2.txt", b"l2\n", "local again");
+        let pushed = super::sync_push(&mine).expect("push");
+        assert_eq!(pushed.status, "merged", "{}", pushed.message);
+        git(&other, &["pull", "--ff-only"]);
+        assert!(other.join("local2.txt").exists());
+
+        commit_file(&other, "shared.txt", b"theirs\n", "remote edit");
+        git(&other, &["push"]);
+        commit_file(&mine, "shared.txt", b"ours\n", "local edit");
+        let conflicted = super::sync_push(&mine).expect("push with conflict");
+        assert_eq!(conflicted.status, "conflicts");
+        assert_eq!(conflicted.conflicts, vec!["shared.txt".to_string()]);
+        assert!(super::merge_in_progress(&mine));
+        git(&mine, &["merge", "--abort"]);
+
+        let conflicted = super::sync_pull(&mine).expect("pull with conflict");
+        assert_eq!(conflicted.status, "conflicts");
+
+        std::fs::remove_dir_all(root).expect("remove fixture");
     }
 
     #[test]

@@ -24,9 +24,9 @@ import {
   mergeBranch,
   mergeContinue,
   openRepo,
-  pullRemote,
   pushTag,
-  pushTo,
+  syncPull,
+  syncPush,
   remoteDetails,
   removeRemote,
   removeWorktree,
@@ -45,7 +45,16 @@ import { buildGraph } from "../graph";
 import { notify } from "../notify";
 import { sameRepo } from "../path";
 import BranchFilterList, { type BranchMenuAction } from "./BranchFilterList.vue";
-import type { BranchInfo, GitCommit, GitFile, MergeState, RecentProject, RemoteDetail, RepoInfo } from "../types";
+import type {
+  BranchInfo,
+  GitCommit,
+  GitFile,
+  MergeState,
+  RecentProject,
+  RemoteDetail,
+  RepoInfo,
+  SyncOutcome,
+} from "../types";
 import CommitDialog from "./CommitDialog.vue";
 import ConflictsDialog from "./ConflictsDialog.vue";
 import ErrorDialog from "./ErrorDialog.vue";
@@ -53,7 +62,6 @@ import FilePreviewDrawer from "./FilePreviewDrawer.vue";
 import FilesPanel from "./FilesPanel.vue";
 import LogPanel from "./LogPanel.vue";
 import MergeDialog from "./MergeDialog.vue";
-import PullMergeConfirmDialog from "./PullMergeConfirmDialog.vue";
 import MergeEditorPage from "./MergeEditorPage.vue";
 import PushDialog from "./PushDialog.vue";
 import RevDiffDialog from "./RevDiffDialog.vue";
@@ -100,8 +108,6 @@ const showPush = ref(false);
 const showMerge = ref(false);
 const mergeInitialTheirs = ref("");
 const mergeFromPull = ref(false);
-const showPullMergeConfirm = ref(false);
-const pullMergeUpstream = ref("");
 const showConflicts = ref(false);
 const mergeEditPath = ref("");
 const conflictState = ref<MergeState | null>(null);
@@ -472,19 +478,30 @@ async function handleCommit(payload: {
     payload.push ? "正在提交并推送…" : "正在提交…",
     async () => {
       await commitChanges(repoPath.value, payload.message, payload.amend, payload.paths);
-      if (payload.push) {
-        await pushTo(repoPath.value, "", repo.value!.branch);
-      }
+      const outcome = payload.push ? await syncPush(repoPath.value, "", repo.value!.branch) : null;
       repo.value = await openRepo(repoPath.value);
       await refreshAll();
       showCommit.value = false;
-      return true;
+      return outcome ?? true;
     },
     { errorPopup: true, errorTitle: payload.push ? "提交并推送失败" : "提交失败" },
   );
-  if (ok) {
-    notify(payload.push ? `已提交并推送到 ${repo.value?.branch || "远程"}` : "提交成功");
+  if (!ok) return;
+  if (ok === true) {
+    notify("提交成功");
+    return;
   }
+  await finishSync(ok, `已提交并推送到 ${repo.value?.branch || "远程"}`);
+}
+
+/** 自动合并后的收尾：无冲突只轻提示，有冲突直接打开冲突处理。 */
+async function finishSync(outcome: SyncOutcome, okMessage: string) {
+  if (outcome.status === "conflicts") {
+    await syncMergeState(true);
+    notify(`自动合并 ${outcome.upstream} 有 ${outcome.conflicts.length} 个冲突，请处理`);
+    return;
+  }
+  notify(outcome.status === "merged" ? `${okMessage}（已自动合并 ${outcome.upstream}）` : okMessage);
 }
 
 async function handleCheckout(name: string) {
@@ -514,37 +531,12 @@ async function handleFetch() {
 
 async function handlePull() {
   const outcome = await withBusy("正在拉取…", async () => {
-    const result = await pullRemote(repoPath.value);
+    const result = await syncPull(repoPath.value);
     repo.value = await openRepo(repoPath.value);
     await refreshAll();
     return result;
   });
-  if (!outcome) return;
-  if (outcome.status === "diverged") {
-    pullMergeUpstream.value = outcome.upstream;
-    showPullMergeConfirm.value = true;
-    statusText.value = "等待确认合并";
-    return;
-  }
-  notify("拉取完成");
-}
-
-function closePullMergeConfirm() {
-  showPullMergeConfirm.value = false;
-  pullMergeUpstream.value = "";
-  statusText.value = "就绪";
-}
-
-async function confirmPullMerge() {
-  const upstream = pullMergeUpstream.value;
-  if (!upstream) {
-    closePullMergeConfirm();
-    return;
-  }
-  showPullMergeConfirm.value = false;
-  pullMergeUpstream.value = "";
-  statusText.value = "就绪";
-  await handleMerge(upstream);
+  if (outcome) await finishSync(outcome, "拉取完成");
 }
 
 function openMergeDialog() {
@@ -742,24 +734,20 @@ async function confirmRenameBranch() {
 async function handlePush(payload?: { remote: string; branch: string }) {
   const remote = payload?.remote || "";
   const branch = payload?.branch || repo.value?.branch || "";
-  const ok = await withBusy(
+  const outcome = await withBusy(
     "正在推送…",
     async () => {
-      if (payload) {
-        await pushTo(repoPath.value, payload.remote, payload.branch);
-      } else {
-        await pushTo(repoPath.value, "", repo.value!.branch);
-      }
+      const result = payload
+        ? await syncPush(repoPath.value, payload.remote, payload.branch)
+        : await syncPush(repoPath.value, "", repo.value!.branch);
       repo.value = await openRepo(repoPath.value);
       await refreshAll();
       showPush.value = false;
-      return true;
+      return result;
     },
     { errorPopup: true, errorTitle: "推送失败" },
   );
-  if (ok) {
-    notify(remote && branch ? `已推送到 ${remote}/${branch}` : "推送成功");
-  }
+  if (outcome) await finishSync(outcome, remote && branch ? `已推送到 ${remote}/${branch}` : "推送成功");
 }
 
 async function handleMerge(theirs: string) {
@@ -1204,14 +1192,6 @@ onUnmounted(() => {
         :from-label="branchCompare.from"
         :to-label="branchCompare.to"
         @close="branchCompare = null"
-      />
-      <PullMergeConfirmDialog
-        v-if="active && showPullMergeConfirm && repo && pullMergeUpstream"
-        :repo="repo"
-        :upstream="pullMergeUpstream"
-        :busy="busy"
-        @close="closePullMergeConfirm"
-        @confirm="confirmPullMerge"
       />
       <MergeDialog
         v-if="active && showMerge"

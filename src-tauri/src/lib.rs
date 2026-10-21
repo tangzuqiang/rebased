@@ -162,6 +162,26 @@ async fn push_remote(state: State<'_, AppState>, repo: Option<String>) -> Result
 }
 
 #[tauri::command]
+async fn sync_pull(state: State<'_, AppState>, repo: Option<String>) -> Result<git::SyncOutcome, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || git::sync_pull(&path)).await
+}
+
+#[tauri::command]
+async fn sync_push(
+    state: State<'_, AppState>,
+    remote: Option<String>,
+    branch: Option<String>,
+    repo: Option<String>,
+) -> Result<git::SyncOutcome, String> {
+    let path = repo_dir(&state, repo)?;
+    run_blocking(move || {
+        git::sync_push_to(&path, remote.as_deref().unwrap_or(""), branch.as_deref().unwrap_or(""))
+    })
+    .await
+}
+
+#[tauri::command]
 async fn get_remotes(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<String>, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::remotes(&path)).await
@@ -810,6 +830,8 @@ pub fn run() {
             fetch_remote,
             pull_remote,
             push_remote,
+            sync_pull,
+            sync_push,
             get_remotes,
             push_to,
             get_merge_preview,

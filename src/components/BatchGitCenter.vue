@@ -6,8 +6,8 @@ import {
   generateCommitMessage,
   getRepo,
   getStatus,
-  pullRemote,
-  pushRemote,
+  syncPull,
+  syncPush,
 } from "../api";
 import type { ProjectTab } from "../types";
 import Icons from "./Icons.vue";
@@ -25,12 +25,14 @@ interface BatchRow {
   state: TaskState;
   message: string;
   stream: string[];
+  conflicts: string[];
 }
 
 const props = defineProps<{ tabs: ProjectTab[] }>();
 const emit = defineEmits<{
   close: [];
   updated: [tab: ProjectTab];
+  resolve: [path: string];
 }>();
 
 const rows = ref<BatchRow[]>(props.tabs.map((tab) => ({
@@ -43,6 +45,7 @@ const rows = ref<BatchRow[]>(props.tabs.map((tab) => ({
   state: "idle",
   message: "等待检查",
   stream: [],
+  conflicts: [],
 })));
 const running = ref(false);
 const loading = ref(false);
@@ -84,7 +87,7 @@ async function refreshRow(row: BatchRow, keepResult = false) {
     name: row.name,
     branch: repo.branch,
     dirty: row.dirty,
-    merging: props.tabs.find((tab) => tab.path === row.path)?.merging ?? false,
+    merging: row.conflicts.length > 0 || (props.tabs.find((tab) => tab.path === row.path)?.merging ?? false),
   });
 }
 
@@ -109,6 +112,7 @@ async function refreshAll() {
 async function runRow(row: BatchRow, operation: Operation) {
   row.state = "running";
   row.stream = [];
+  row.conflicts = [];
   appendStream(row, operation === "fetch" ? "开始获取远程引用…"
     : operation === "pull" ? "开始拉取远程更新…"
       : operation === "commit" ? "开始扫描待提交文件…" : "开始推送本地提交…");
@@ -117,14 +121,16 @@ async function runRow(row: BatchRow, operation: Operation) {
       const message = await fetchRemote(row.path);
       row.state = "success";
       appendStream(row, message.trim() || "获取完成");
-    } else if (operation === "pull") {
-      const outcome = await pullRemote(row.path);
-      if (outcome.status === "diverged") {
+    } else if (operation === "pull" || operation === "push") {
+      const outcome = operation === "pull" ? await syncPull(row.path) : await syncPush(row.path);
+      if (outcome.status === "conflicts") {
         row.state = "warning";
-        appendStream(row, `${outcome.message}（${outcome.upstream}）`);
+        row.conflicts = outcome.conflicts;
+        appendStream(row, outcome.message);
+        for (const path of outcome.conflicts.slice(0, 20)) appendStream(row, `冲突：${path}`);
       } else {
         row.state = "success";
-        appendStream(row, outcome.message.trim() || "拉取完成");
+        appendStream(row, outcome.message.trim() || (operation === "pull" ? "拉取完成" : "推送完成"));
       }
     } else if (operation === "commit") {
       const status = await getStatus(row.path);
@@ -145,10 +151,6 @@ async function runRow(row: BatchRow, operation: Operation) {
         row.state = "success";
         appendStream(row, `提交完成，共 ${files.length} 个文件`);
       }
-    } else {
-      const message = await pushRemote(row.path);
-      row.state = "success";
-      appendStream(row, message.trim() || "推送完成");
     }
     appendStream(row, "正在刷新仓库状态…");
     await refreshRow(row, true);
@@ -240,6 +242,13 @@ onMounted(() => void refreshAll());
                 <Icons v-else-if="row.state === 'success'" name="check" :size="13" />
                 <span v-else-if="row.state === 'error' || row.state === 'warning'" class="mark">!</span>
                 <strong>{{ row.state === 'running' ? '执行中' : row.state === 'success' ? '已完成' : row.state === 'error' ? '失败' : row.state === 'warning' ? '需处理' : '就绪' }}</strong>
+                <button
+                  v-if="row.conflicts.length && !running"
+                  type="button"
+                  class="resolve-btn"
+                  title="打开该项目处理合并冲突"
+                  @click="emit('resolve', row.path)"
+                >去处理 {{ row.conflicts.length }} 个冲突</button>
               </div>
               <div class="stream" :title="row.stream.join('\n')">
                 <span v-for="(line, index) in row.stream" :key="index">{{ line }}</span>
@@ -282,6 +291,8 @@ tr:hover td { background: var(--bg-hover); }
 .result { padding-top: 9px; padding-bottom: 9px; }
 .result-head { margin-bottom: 5px; }
 .result-head strong { font-size: 11px; font-weight: 600; }
+.resolve-btn { margin-left: 6px; height: 20px; padding: 0 8px; border: 1px solid currentColor; border-radius: 4px; color: var(--text-warn); font-size: 11px; }
+.resolve-btn:hover { background: color-mix(in srgb, var(--text-warn) 18%, transparent); }
 .stream { max-height: 150px; overflow: auto; color: var(--text-muted); font-family: Consolas, "Courier New", monospace; font-size: 11px; line-height: 1.5; white-space: pre-wrap; }
 .stream span { display: block; }
 .dirty { color: var(--renamed); }
