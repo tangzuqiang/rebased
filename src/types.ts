@@ -197,19 +197,3 @@ export interface SyncOutcome {
   upstream: string;
   conflicts: string[];
 }
-
-export type DiffKind = "same" | "changed" | "added" | "deleted" | "conflict" | "empty";
-
-export interface Diff3Row {
-  ours: string;
-  base: string;
-  theirs: string;
-  oursKind: DiffKind;
-  baseKind: DiffKind;
-  theirsKind: DiffKind;
-  /** 同一处冲突的每一行，包含一侧较长时多出来的行。 */
-  forceConflict?: boolean;
-  oursBlame?: BlameLine;
-  baseBlame?: BlameLine;
-  theirsBlame?: BlameLine;
-}

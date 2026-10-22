@@ -1,14 +1,41 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { Compartment, type ChangeSpec, type Extension, type StateField } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
+import { isolateHistory } from "@codemirror/commands";
+import { openSearchPanel } from "@codemirror/search";
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 import { getConflictFile } from "../api";
-import { alignDiff3 } from "../diff3";
-import { commentPrefix, findInTextarea, handleIdeEditorKey, writeTextarea } from "../editorKeys";
-import { highlightCode } from "../highlight";
-import { joinLines, remapLines } from "../mergeLines";
-import "highlight.js/styles/atom-one-dark.css";
+import {
+  blameGutter,
+  createMergeField,
+  createPane,
+  heightOfLine,
+  lineTop,
+  setMerge,
+  topLine,
+  updateMarks,
+  type BlameLabel,
+  type MergeSnapshot,
+  type PaneMark,
+  type SideStates,
+} from "../mergeEditor";
+import {
+  anchorsFor,
+  buildBlocks,
+  changedChars,
+  mapLine,
+  resolveSimple,
+  resultKind,
+  sideKind,
+  splitLines,
+  type BlockKind,
+  type CharRange,
+  type LineRange,
+  type MergeBlock,
+  type SideName,
+} from "../mergeModel";
 import { notify } from "../notify";
-import type { BlameLine, Diff3Row, DiffKind, MergeFileContent, MergeState } from "../types";
-import Icons from "./Icons.vue";
+import type { BlameLine, MergeFileContent, MergeState } from "../types";
 
 const props = defineProps<{
   state: MergeState;
@@ -20,223 +47,111 @@ const props = defineProps<{
 const emit = defineEmits<{
   back: [];
   save: [payload: { path: string; content: string }];
-  abort: [];
 }>();
 
-interface Hunk {
-  start: number;
-  end: number;
-  ours: boolean;
-  theirs: boolean;
-  conflict: boolean;
+type Pane = "ours" | "result" | "theirs";
+
+interface Band {
+  index: number;
+  kind: BlockKind;
+  d: string;
+  button: number;
 }
 
-interface ViewerRow {
-  isFold: false;
-  oursHtml: string;
-  theirsHtml: string;
-  oursNo: number | "";
-  theirsNo: number | "";
-  oursKind: string;
-  theirsKind: string;
-  oursBlame?: BlameLine;
-  theirsBlame?: BlameLine;
-  rowIndex: number;
-  hunkStart: boolean;
-  hunk?: Hunk;
-  conflictBorder: boolean;
-  blameOursAnno: string;
-  blameTheirsAnno: string;
+interface Settings {
+  ignoreWhitespace: boolean;
+  highlight: "words" | "lines";
+  syncScroll: boolean;
+  blame: boolean;
 }
 
-interface FoldRow {
-  isFold: true;
-  count: number;
-  start: number;
+const SETTINGS_KEY = "rebased.mergeViewer";
+const DIVIDER = 30;
+
+function loadSettings(): Settings {
+  const fallback: Settings = { ignoreWhitespace: false, highlight: "words", syncScroll: true, blame: false };
+  try {
+    return { ...fallback, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") };
+  } catch {
+    return fallback;
+  }
 }
 
-type VRow = ViewerRow | FoldRow;
-type Side = "ours" | "theirs";
-type Choice = Side | "base" | "both";
-
-const ROW_HEIGHT = 18;
-
+const settings = ref<Settings>(loadSettings());
 const content = ref<MergeFileContent | null>(null);
-const result = ref("");
-const seededText = ref("");
-const resultLines = ref<Array<string | null>>([]);
-const choice = ref<Record<string, Choice>>({});
-const settled = ref<Record<string, { ours: boolean; theirs: boolean }>>({});
 const loading = ref(false);
 const error = ref("");
-const ignoreWhitespace = ref(false);
-const showBlame = ref(true);
-const overwrite = ref<"ours" | "theirs" | "">("");
-const currentHunk = ref(0);
-const mergeReady = ref(false);
-const completeOpen = ref(false);
-const completeShown = ref(false);
-const oursPane = ref<HTMLElement | null>(null);
-const resultPane = ref<HTMLElement | null>(null);
-const theirsPane = ref<HTMLElement | null>(null);
-const leftGutter = ref<HTMLElement | null>(null);
-const rightGutter = ref<HTMLElement | null>(null);
-const resultEditor = ref<HTMLTextAreaElement | null>(null);
-const findOpen = ref(false);
-const findQuery = ref("");
-const findHint = ref("");
-const expandedFolds = ref<Set<number>>(new Set());
+const blocks = shallowRef<MergeBlock[]>([]);
+const snapshot = shallowRef<MergeSnapshot>({ ranges: [], states: [] });
+const bands = shallowRef<{ left: Band[]; right: Band[] }>({ left: [], right: [] });
+const lineCounts = ref({ ours: 1, result: 1, theirs: 1 });
+const current = ref(-1);
+const settingsOpen = ref(false);
 
-const FOLD_THRESHOLD = 8;
+const oursHost = ref<HTMLElement | null>(null);
+const resultHost = ref<HTMLElement | null>(null);
+const theirsHost = ref<HTMLElement | null>(null);
+const leftDivider = ref<HTMLElement | null>(null);
+const rightDivider = ref<HTMLElement | null>(null);
+
+let views: Record<Pane, EditorView | null> = { ours: null, result: null, theirs: null };
+let mergeField: StateField<MergeSnapshot> | null = null;
+let lines = { ours: [] as string[], base: [] as string[], theirs: [] as string[] };
+let baseText = "";
+let wordCache = new Map<string, CharRange[]>();
+let simpleCache = new Map<number, string | null>();
+let drawFrame = 0;
+let scrollDriver: Pane | null = null;
+let scrollDriverTimer = 0;
+const blameSlots: Record<"ours" | "theirs", Compartment> = { ours: new Compartment(), theirs: new Compartment() };
 
 const editable = computed(() => Boolean(content.value && !content.value.binary && !content.value.tooLarge));
-const dirty = computed(() => result.value !== seededText.value || Object.keys(choice.value).length > 0);
 
-const rows = computed<Diff3Row[]>(() => {
-  if (!content.value || !editable.value) return [];
-  return alignDiff3(content.value.ours, content.value.base, content.value.theirs, {
-    ignoreWhitespace: ignoreWhitespace.value,
-    blame: {
-      ours: content.value.oursBlame,
-      base: content.value.baseBlame,
-      theirs: content.value.theirsBlame,
-    },
-  });
-});
-
-const hunks = computed(() => {
-  const list: Hunk[] = [];
-  const all = rows.value;
-  let index = 0;
-  while (index < all.length) {
-    const ours = isSideChange(all[index].oursKind);
-    const theirs = isSideChange(all[index].theirsKind);
-    if (!ours && !theirs) {
-      index += 1;
-      continue;
-    }
-    const start = index;
-    const kind = hunkKind(all[index]);
-    index += 1;
-    while (index < all.length && hunkKind(all[index]) === kind) {
-      index += 1;
-    }
-    list.push({
-      start,
-      end: index,
-      ours: kind === "ours" || kind === "conflict",
-      theirs: kind === "theirs" || kind === "conflict",
-      conflict: kind === "conflict",
-    });
-  }
-  return list;
-});
-
-const unresolvedConflicts = computed(() => hunks.value.filter((h) => h.conflict && !hunkDone(h)));
-const conflictCount = computed(() => unresolvedConflicts.value.length);
-const totalConflicts = computed(() => hunks.value.filter((h) => h.conflict).length);
-const resolvedCount = computed(() => totalConflicts.value - conflictCount.value);
-const currentStart = computed(() => hunks.value[currentHunk.value]?.start ?? -1);
-const canGoUp = computed(() => unresolvedConflicts.value.some((h) => h.start < currentStart.value));
-const canGoDown = computed(() => unresolvedConflicts.value.some((h) => h.start > currentStart.value));
-const nonConflictCount = computed(() => hunks.value.filter((h) => !h.conflict && !hunkDone(h)).length);
-
-const highlighted = computed(() => {
-  const all = rows.value;
-  if (!all.length || !content.value || !editable.value)
-    return { ours: [] as string[], theirs: [] as string[] };
-  const oursLines = all.map((r) => r.ours);
-  const theirsLines = all.map((r) => r.theirs);
+const pendingBlocks = computed(() =>
+  blocks.value.filter((block) => {
+    const state = snapshot.value.states[block.index];
+    return state && (state.ours === "pending" || state.theirs === "pending");
+  }),
+);
+const pendingConflicts = computed(() => pendingBlocks.value.filter((block) => block.conflict).length);
+const pendingChanges = computed(() => pendingBlocks.value.length);
+const allDone = computed(() => editable.value && blocks.value.length > 0 && pendingChanges.value === 0);
+const canResolveSimple = computed(() =>
+  pendingBlocks.value.some((block) => block.conflict && untouched(block) && simpleOf(block) !== null),
+);
+const nonConflicting = computed(() => {
+  const list = pendingBlocks.value.filter((block) => !block.conflict);
   return {
-    ours: splitHighlighted(oursLines, content.value!.path),
-    theirs: splitHighlighted(theirsLines, content.value!.path),
+    ours: list.some((block) => block.oursChanged),
+    theirs: list.some((block) => block.theirsChanged),
+    all: list.length > 0,
   };
 });
+const canPrev = computed(() => pendingBlocks.value.some((block) => block.index < current.value));
+const canNext = computed(() => pendingBlocks.value.some((block) => block.index > current.value));
 
-const wordDiffMap = computed(() => {
-  const cache = new Map<string, WordSeg[]>();
-  const result = new Map<number, WordSeg[]>();
-  for (const hunk of hunks.value) {
-    if (!hunk.conflict) continue;
-    for (let i = hunk.start; i < hunk.end; i++) {
-      const row = rows.value[i];
-      if (!row || row.oursKind !== "conflict") continue;
-      const key = `${row.ours}\x00${row.theirs}`;
-      let segs = cache.get(key);
-      if (!segs) {
-        segs = computeWordDiff(row.ours, row.theirs);
-        cache.set(key, segs);
-      }
-      result.set(i, segs);
-    }
-  }
-  return result;
+const oursAnchors = computed(() =>
+  anchorsFor(
+    blocks.value.map((block) => [block.ours, snapshot.value.ranges[block.index] ?? block.base] as [LineRange, LineRange]),
+    lineCounts.value.ours,
+    lineCounts.value.result,
+  ),
+);
+const theirsAnchors = computed(() =>
+  anchorsFor(
+    blocks.value.map((block) => [block.theirs, snapshot.value.ranges[block.index] ?? block.base] as [LineRange, LineRange]),
+    lineCounts.value.theirs,
+    lineCounts.value.result,
+  ),
+);
+
+const statusText = computed(() => {
+  if (!blocks.value.length) return "没有更改";
+  if (!pendingChanges.value) return "所有更改均已处理";
+  return `${pendingChanges.value} 处更改。${pendingConflicts.value} 个冲突`;
 });
 
-const oursNos = computed(() => numberSide(rows.value, (r) => r.oursKind));
-const theirsNos = computed(() => numberSide(rows.value, (r) => r.theirsKind));
-
-const viewerRows = computed<VRow[]>(() => {
-  const all = rows.value;
-  const hl = highlighted.value;
-  const result: VRow[] = [];
-  let i = 0;
-
-  while (i < all.length) {
-    const row = all[i];
-    const oursChanged = isSideChange(row.oursKind);
-    const theirsChanged = isSideChange(row.theirsKind);
-
-    if (oursChanged || theirsChanged) {
-      const hunk = hunkOf(i);
-      result.push(makeViewerRow(i, hl, hunk));
-      i++;
-    } else {
-      let start = i;
-      while (i < all.length && !isSideChange(all[i].oursKind) && !isSideChange(all[i].theirsKind)) {
-        i++;
-      }
-      const count = i - start;
-
-      if (count > FOLD_THRESHOLD) {
-        result.push({ isFold: true, count, start });
-        if (expandedFolds.value.has(start)) {
-          for (let j = start; j < i; j++) result.push(makeViewerRow(j, hl, undefined));
-        }
-      } else {
-        for (let j = start; j < i; j++) result.push(makeViewerRow(j, hl, undefined));
-      }
-    }
-  }
-  return result;
-});
-
-const rowToVisual = computed(() => {
-  const map: number[] = new Array(rows.value.length).fill(0);
-  viewerRows.value.forEach((vr, visual) => {
-    if (!vr.isFold) {
-      map[vr.rowIndex] = visual;
-    } else if (!expandedFolds.value.has(vr.start)) {
-      for (let r = vr.start; r < vr.start + vr.count; r++) map[r] = visual;
-    }
-  });
-  return map;
-});
-
-const resultLayout = computed(() => {
-  const starts: number[] = [];
-  const owners: number[] = [];
-  resultLines.value.forEach((line, row) => {
-    starts.push(owners.length);
-    if (line === null) return;
-    const count = line.split("\n").length;
-    for (let k = 0; k < count; k++) owners.push(row);
-  });
-  starts.push(owners.length);
-  return { starts, owners };
-});
-
-const resultLineCount = computed(() => Math.max(1, result.value.split("\n").length));
+watch(settings, (value) => localStorage.setItem(SETTINGS_KEY, JSON.stringify(value)), { deep: true });
 
 watch(
   () => props.path,
@@ -246,24 +161,25 @@ watch(
   { immediate: true },
 );
 
-watch([() => content.value?.path, ignoreWhitespace], () => {
-  if (!content.value?.path) return;
-  seedResult();
-  currentHunk.value = 0;
-  mergeReady.value = false;
-  completeOpen.value = false;
-  completeShown.value = false;
-  overwrite.value = "";
-  expandedFolds.value = new Set();
+watch([snapshot, () => settings.value.highlight], () => {
+  refreshMarks();
+  scheduleDraw();
 });
 
-watch(resultEditor, (el) => {
-  if (el) writeTextarea(el, result.value);
-});
+watch(
+  () => settings.value.blame,
+  (on) => {
+    for (const side of ["ours", "theirs"] as const) {
+      views[side]?.dispatch({ effects: blameSlots[side].reconfigure(blameExtension(side, on)) });
+    }
+    scheduleDraw();
+  },
+);
 
 async function loadFile(path: string) {
   loading.value = true;
   error.value = "";
+  destroyEditors();
   try {
     content.value = await getConflictFile(props.repoPath, path);
   } catch (err) {
@@ -272,1318 +188,1255 @@ async function loadFile(path: string) {
   } finally {
     loading.value = false;
   }
-}
-
-function isSideChange(kind: DiffKind) {
-  return kind === "changed" || kind === "added" || kind === "deleted" || kind === "conflict";
-}
-
-function hunkKind(row: Diff3Row): "ours" | "theirs" | "conflict" | "" {
-  if (row.forceConflict) return "conflict";
-  const ours = isSideChange(row.oursKind);
-  const theirs = isSideChange(row.theirsKind);
-  if (ours && theirs) return "conflict";
-  if (ours) return "ours";
-  if (theirs) return "theirs";
-  return "";
-}
-
-function numberSide(list: Diff3Row[], kindOf: (row: Diff3Row) => DiffKind) {
-  const numbers: Array<number | ""> = [];
-  let line = 0;
-  for (const row of list) {
-    const kind = kindOf(row);
-    if (kind === "empty" || kind === "deleted") numbers.push("");
-    else {
-      line += 1;
-      numbers.push(line);
-    }
-  }
-  return numbers;
-}
-
-function lineFrom(row: Diff3Row, side: "ours" | "theirs" | "base") {
-  const kind = side === "ours" ? row.oursKind : side === "theirs" ? row.theirsKind : row.baseKind;
-  const text = side === "ours" ? row.ours : side === "theirs" ? row.theirs : row.base;
-  if (kind === "empty" || kind === "deleted") return null;
-  return text;
-}
-
-function defaultResultLine(row: Diff3Row) {
-  if (row.forceConflict) return lineFrom(row, "ours");
-  const oursChange = isSideChange(row.oursKind);
-  const theirsChange = isSideChange(row.theirsKind);
-  if (theirsChange && !oursChange) return lineFrom(row, "theirs");
-  return lineFrom(row, "ours");
-}
-
-function seedResult() {
-  resultLines.value = rows.value.map(defaultResultLine);
-  choice.value = {};
-  settled.value = {};
-  seededText.value = joinLines(resultLines.value);
-  setResultText(seededText.value);
-}
-
-function markComplete() {
-  mergeReady.value = true;
-  if (completeShown.value) return;
-  completeShown.value = true;
-  completeOpen.value = true;
-}
-
-function checkConflictsResolved() {
-  const conflicts = hunks.value.filter((h) => h.conflict);
-  if (!conflicts.length) return;
-  if (conflicts.every((h) => hunkDone(h))) markComplete();
-}
-
-function sideSettled(hunk: Hunk, side: "ours" | "theirs") {
-  return Boolean(settled.value[hunkKey(hunk)]?.[side]);
-}
-
-function hunkDone(hunk: Hunk) {
-  const key = hunkKey(hunk);
-  const state = settled.value[key];
-  if (!state) return false;
-  if (hunk.conflict) {
-    const picked = choice.value[key];
-    return picked === "ours" || picked === "theirs" || picked === "both" || (state.ours && state.theirs);
-  }
-  return (hunk.ours ? state.ours : true) && (hunk.theirs ? state.theirs : true);
-}
-
-function markSettled(hunk: Hunk, patch: { ours?: boolean; theirs?: boolean }) {
-  const key = hunkKey(hunk);
-  const prev = settled.value[key] ?? { ours: false, theirs: false };
-  settled.value = {
-    ...settled.value,
-    [key]: { ours: patch.ours ?? prev.ours, theirs: patch.theirs ?? prev.theirs },
-  };
-}
-
-function hunkKey(hunk: Hunk) {
-  return `${hunk.start}:${hunk.end}`;
-}
-
-function hunkOf(index: number) {
-  return hunks.value.find((h) => index >= h.start && index < h.end);
-}
-
-function fillHunk(hunk: Hunk, lines: Array<string | null>, picked: Choice) {
-  const next = [...resultLines.value];
-  for (let i = hunk.start; i < hunk.end; i += 1) {
-    next[i] = lines[i - hunk.start] ?? null;
-  }
-  resultLines.value = next;
-  choice.value = { ...choice.value, [hunkKey(hunk)]: picked };
-  setResultText(joinLines(next));
-  currentHunk.value = Math.max(0, hunks.value.findIndex((item) => item.start === hunk.start));
-}
-
-function applyHunk(hunk: Hunk, side: Side | "base") {
-  const source = rows.value;
-  const lines: Array<string | null> = [];
-  for (let i = hunk.start; i < hunk.end; i += 1) lines.push(lineFrom(source[i], side));
-  fillHunk(hunk, lines, side);
-  checkConflictsResolved();
-}
-
-function applyBoth(hunk: Hunk, first: Side, second: Side) {
-  const source = rows.value;
-  const merged: string[] = [];
-  for (const side of [first, second]) {
-    for (let i = hunk.start; i < hunk.end; i += 1) {
-      const line = lineFrom(source[i], side);
-      if (line !== null) merged.push(line);
-    }
-  }
-  const lines: Array<string | null> = new Array(hunk.end - hunk.start).fill(null);
-  if (merged.length) lines[0] = merged.join("\n");
-  fillHunk(hunk, lines, "both");
-}
-
-function setResultText(text: string) {
-  result.value = text;
-  writeTextarea(resultEditor.value, text);
-}
-
-function onResultInput(event: Event) {
-  const target = event.target;
-  if (!(target instanceof HTMLTextAreaElement)) return;
-  result.value = target.value;
-  resultLines.value = remapLines(resultLines.value, result.value);
-}
-
-function acceptHunk(hunk: Hunk, side: Side) {
-  const other: Side = side === "ours" ? "theirs" : "ours";
-  if (hunk.conflict && choice.value[hunkKey(hunk)] === other && sideSettled(hunk, other)) {
-    applyBoth(hunk, other, side);
-  } else {
-    applyHunk(hunk, side);
-  }
-  markSettled(hunk, { [side]: true });
-  checkConflictsResolved();
-}
-
-function rejectHunk(hunk: Hunk, side: Side) {
-  const current = choice.value[hunkKey(hunk)];
-  const other: Side = side === "ours" ? "theirs" : "ours";
-  applyHunk(hunk, current === other || current === "both" ? other : "base");
-  markSettled(hunk, { [side]: true });
-  checkConflictsResolved();
-}
-
-function applyNonConflicts() {
-  let applied = 0;
-  for (const hunk of hunks.value) {
-    if (hunk.conflict || hunkDone(hunk)) continue;
-    if (hunk.theirs && !hunk.ours) {
-      applyHunk(hunk, "theirs");
-      markSettled(hunk, { theirs: true, ours: true });
-      applied += 1;
-    } else if (hunk.ours && !hunk.theirs) {
-      applyHunk(hunk, "ours");
-      markSettled(hunk, { ours: true, theirs: true });
-      applied += 1;
-    }
-  }
-  const left = unresolvedConflicts.value.length;
-  if (!applied) {
-    notify(left ? "没有可自动应用的非冲突更改，请手动处理冲突" : "没有可应用的非冲突更改", "error");
-    return;
-  }
-  notify(left ? `已应用 ${applied} 处非冲突更改，仍有 ${left} 处冲突待处理` : `已应用 ${applied} 处非冲突更改`);
-  if (!left) markComplete();
-}
-
-function soften(kind: DiffKind): DiffKind {
-  return kind === "conflict" ? "changed" : kind;
-}
-
-function sideKind(index: number, side: "ours" | "theirs"): string {
-  const row = rows.value[index];
-  const raw = side === "ours" ? row.oursKind : row.theirsKind;
-  const hunk = hunkOf(index);
-  if (!hunk) return raw;
-  if (sideSettled(hunk, side)) {
-    const picked = choice.value[hunkKey(hunk)];
-    if (picked !== side && picked !== "both") return raw === "empty" ? "empty" : "discarded";
-    return soften(raw);
-  }
-  return raw;
-}
-
-function formatBlame(meta?: BlameLine) {
-  if (!meta?.author) return "";
-  const time = meta.timestamp
-    ? new Date(meta.timestamp * 1000).toLocaleString("zh-CN", { hour12: false })
-    : "";
-  return time ? `${meta.author} · ${time}` : meta.author;
-}
-
-function blameDateAuthor(meta?: BlameLine) {
-  if (!meta?.author) return "";
-  const date = meta.timestamp
-    ? new Date(meta.timestamp * 1000).toLocaleDateString("zh-CN")
-    : "";
-  return date ? `${date} ${meta.author}` : meta.author;
-}
-
-function blameAnno(index: number, side: "ours" | "theirs") {
-  if (!showBlame.value) return "";
-  const row = rows.value[index];
-  const meta = side === "ours" ? row.oursBlame : row.theirsBlame;
-  const label = blameDateAuthor(meta);
-  if (!label) return "";
-  if (index > 0) {
-    const prevRow = rows.value[index - 1];
-    const prevMeta = side === "ours" ? prevRow.oursBlame : prevRow.theirsBlame;
-    if (blameDateAuthor(prevMeta) === label) return "";
-  }
-  return label;
-}
-
-function makeViewerRow(index: number, hl: { ours: string[]; theirs: string[] }, hunk: Hunk | undefined): ViewerRow {
-  const row = rows.value[index];
-  const sk_ours = sideKind(index, "ours");
-  const sk_theirs = sideKind(index, "theirs");
-  let oursHtml = hl.ours[index] ?? escapeHtml(row.ours);
-  let theirsHtml = hl.theirs[index] ?? escapeHtml(row.theirs);
-
-  if (hunk?.conflict && sk_ours === "conflict") {
-    const segs = wordDiffMap.value.get(index);
-    if (segs) oursHtml = renderWordHtml(segs, "ours");
-  }
-  if (hunk?.conflict && sk_theirs === "conflict") {
-    const segs = wordDiffMap.value.get(index);
-    if (segs) theirsHtml = renderWordHtml(segs, "theirs");
-  }
-
-  return {
-    isFold: false,
-    oursHtml,
-    theirsHtml,
-    oursNo: oursNos.value[index],
-    theirsNo: theirsNos.value[index],
-    oursKind: sk_ours,
-    theirsKind: sk_theirs,
-    oursBlame: row.oursBlame,
-    theirsBlame: row.theirsBlame,
-    rowIndex: index,
-    hunkStart: hunk !== undefined && hunk.start === index,
-    hunk,
-    conflictBorder: hunk !== undefined && hunk.conflict && !hunkDone(hunk),
-    blameOursAnno: blameAnno(index, "ours"),
-    blameTheirsAnno: blameAnno(index, "theirs"),
-  };
-}
-
-function sidePanes() {
-  return [oursPane.value, theirsPane.value, leftGutter.value, rightGutter.value];
-}
-
-function codePanes() {
-  return [oursPane.value, resultPane.value, theirsPane.value];
-}
-
-let scrollDriver: HTMLElement | null = null;
-let scrollDriverTimer = 0;
-
-function holdScrollDriver(el: HTMLElement) {
-  scrollDriver = el;
-  window.clearTimeout(scrollDriverTimer);
-  scrollDriverTimer = window.setTimeout(() => {
-    scrollDriver = null;
-  }, 80);
-}
-
-function sideTopToResult(top: number) {
-  const visual = Math.floor(top / ROW_HEIGHT);
-  const vr = viewerRows.value[visual];
-  if (!vr) return resultLayout.value.owners.length * ROW_HEIGHT;
-  const row = vr.isFold ? vr.start : vr.rowIndex;
-  const frac = vr.isFold || resultLines.value[row] === null ? 0 : top - visual * ROW_HEIGHT;
-  return resultLayout.value.starts[row] * ROW_HEIGHT + frac;
-}
-
-function resultTopToSide(top: number) {
-  const line = Math.floor(top / ROW_HEIGHT);
-  const { owners, starts } = resultLayout.value;
-  const row = owners[line];
-  if (row === undefined) return viewerRows.value.length * ROW_HEIGHT;
-  const frac = line === starts[row] ? top - line * ROW_HEIGHT : 0;
-  return rowToVisual.value[row] * ROW_HEIGHT + frac;
-}
-
-function syncScroll(event: Event) {
-  const source = event.target;
-  if (!(source instanceof HTMLElement)) return;
-  if (scrollDriver && scrollDriver !== source) return;
-  holdScrollDriver(source);
-  if (source === resultPane.value) {
-    const top = resultTopToSide(source.scrollTop);
-    for (const pane of sidePanes()) if (pane) pane.scrollTop = top;
-  } else {
-    for (const pane of sidePanes()) if (pane && pane !== source) pane.scrollTop = source.scrollTop;
-    if (resultPane.value) resultPane.value.scrollTop = sideTopToResult(source.scrollTop);
-  }
-  if (codePanes().includes(source)) {
-    for (const pane of codePanes()) if (pane && pane !== source) pane.scrollLeft = source.scrollLeft;
-  }
-}
-
-async function goHunk(delta: number) {
-  const list = unresolvedConflicts.value;
-  if (!list.length) return;
-  const start = currentStart.value;
-  const target =
-    delta < 0
-      ? [...list].reverse().find((h) => h.start < start)
-      : list.find((h) => h.start > start);
-  if (!target) return;
-  currentHunk.value = Math.max(0, hunks.value.findIndex((h) => h.start === target.start));
   await nextTick();
-  if (resultPane.value) holdScrollDriver(resultPane.value);
-  const sideTop = Math.max(0, rowToVisual.value[target.start] * ROW_HEIGHT - 80);
-  for (const pane of sidePanes()) if (pane) pane.scrollTop = sideTop;
-  if (resultPane.value) {
-    resultPane.value.scrollTop = Math.max(0, resultLayout.value.starts[target.start] * ROW_HEIGHT - 80);
-  }
+  mountEditors();
 }
 
-function coverAll(side: "ours" | "theirs") {
-  overwrite.value = side;
-  for (const hunk of hunks.value) {
-    applyHunk(hunk, side);
-    markSettled(hunk, { ours: true, theirs: true });
-  }
-  notify(side === "ours" ? "已用本地版本覆盖全部改动" : "已用传入版本覆盖全部改动");
-  if (!unresolvedConflicts.value.length) mergeReady.value = true;
+function destroyEditors() {
+  for (const view of Object.values(views)) view?.destroy();
+  views = { ours: null, result: null, theirs: null };
+  mergeField = null;
+  blocks.value = [];
+  snapshot.value = { ranges: [], states: [] };
+  bands.value = { left: [], right: [] };
 }
 
-function applyCurrent() {
-  if (props.busy || !editable.value) return;
-  if (
-    conflictCount.value > 0 &&
-    !window.confirm(`还有 ${conflictCount.value} 处冲突未通过按钮处理，将按结果区当前内容保存，确定应用？`)
-  ) {
-    return;
-  }
-  emit("save", { path: props.path, content: result.value });
+function initialSnapshot(list: MergeBlock[]): MergeSnapshot {
+  return {
+    ranges: list.map((block) => ({ ...block.base })),
+    states: list.map((block) => ({
+      ours: block.oursChanged ? "pending" : "none",
+      theirs: block.theirsChanged ? "pending" : "none",
+    })),
+  };
 }
 
-function goBack() {
-  if (dirty.value && !window.confirm("当前文件的处理结果尚未应用，返回后将丢失，确定返回？")) return;
-  emit("back");
+function mountEditors() {
+  destroyEditors();
+  const file = content.value;
+  if (!file || !editable.value || !oursHost.value || !resultHost.value || !theirsHost.value) return;
+  lines = { ours: splitLines(file.ours), base: splitLines(file.base), theirs: splitLines(file.theirs) };
+  baseText = lines.base.join("\n");
+  wordCache = new Map();
+  simpleCache = new Map();
+  current.value = -1;
+  const list = buildBlocks(lines.ours, lines.base, lines.theirs, settings.value.ignoreWhitespace);
+  const initial = initialSnapshot(list);
+  const merge = createMergeField(initial);
+  mergeField = merge.field;
+  lineCounts.value = { ours: lines.ours.length, result: lines.base.length, theirs: lines.theirs.length };
+
+  const geometry = EditorView.updateListener.of((update) => {
+    if (update.geometryChanged || update.viewportChanged || update.docChanged) scheduleDraw();
+  });
+  views.ours = createPane(oursHost.value, {
+    doc: lines.ours.join("\n"),
+    path: file.path,
+    readOnly: true,
+    blame: blameSlots.ours,
+    blameExtension: blameExtension("ours", settings.value.blame),
+    extensions: [geometry],
+  });
+  views.theirs = createPane(theirsHost.value, {
+    doc: lines.theirs.join("\n"),
+    path: file.path,
+    readOnly: true,
+    blame: blameSlots.theirs,
+    blameExtension: blameExtension("theirs", settings.value.blame),
+    extensions: [geometry],
+  });
+  views.result = createPane(resultHost.value, {
+    doc: baseText,
+    path: file.path,
+    readOnly: false,
+    blame: new Compartment(),
+    blameExtension: [],
+    extraKeys: [
+      {
+        key: "Mod-s",
+        run: () => {
+          applyCurrent();
+          return true;
+        },
+      },
+    ],
+    extensions: [
+      merge.extension,
+      geometry,
+      EditorView.updateListener.of((update) => {
+        if (!mergeField) return;
+        if (update.docChanged) lineCounts.value.result = update.state.doc.lines;
+        const next = update.state.field(mergeField);
+        if (next !== update.startState.field(mergeField)) snapshot.value = next;
+      }),
+    ],
+  });
+  blocks.value = list;
+  snapshot.value = initial;
+  for (const pane of ["ours", "result", "theirs"] as Pane[]) {
+    views[pane]?.scrollDOM.addEventListener("scroll", () => onScroll(pane), { passive: true });
+  }
+  refreshMarks();
+  scheduleDraw();
 }
 
-function toggleIgnoreWhitespace(event: Event) {
-  const target = event.target as HTMLInputElement;
-  if (dirty.value && !window.confirm("切换「忽略空白」会重新生成结果，当前文件的处理进度将丢失，确定继续？")) {
-    target.checked = ignoreWhitespace.value;
-    return;
-  }
-  ignoreWhitespace.value = target.checked;
+function blameExtension(side: "ours" | "theirs", on: boolean): Extension {
+  if (!on) return [];
+  const source = side === "ours" ? content.value?.oursBlame : content.value?.theirsBlame;
+  if (!source?.length) return [];
+  return blameGutter(source.map(blameLabel));
 }
 
-function onPageKey(event: KeyboardEvent) {
-  if (event.key !== "Escape" || event.defaultPrevented) return;
-  event.preventDefault();
-  if (completeOpen.value) {
-    completeOpen.value = false;
-  } else if (findOpen.value) {
-    findOpen.value = false;
-  } else {
-    goBack();
-  }
+function blameLabel(meta?: BlameLine): BlameLabel {
+  if (!meta?.author) return { label: "", title: "" };
+  const time = meta.timestamp ? new Date(meta.timestamp * 1000) : null;
+  const date = time ? time.toLocaleDateString("zh-CN") : "";
+  return {
+    label: date ? `${date} ${meta.author}` : meta.author,
+    title: time ? `${meta.author} · ${time.toLocaleString("zh-CN", { hour12: false })}` : meta.author,
+  };
 }
 
-onMounted(() => window.addEventListener("keydown", onPageKey));
-onUnmounted(() => {
-  window.removeEventListener("keydown", onPageKey);
-  window.clearTimeout(scrollDriverTimer);
-});
-
-function runFind(reverse = false) {
-  const el = resultEditor.value;
-  if (!el || !findQuery.value) return;
-  findHint.value = findInTextarea(el, findQuery.value, reverse) ? "" : "未找到";
+function sideRange(block: MergeBlock, side: SideName) {
+  return side === "ours" ? block.ours : block.theirs;
 }
 
-function onResultKey(event: KeyboardEvent) {
-  if (event.key === "Escape" && findOpen.value) {
-    event.preventDefault();
-    findOpen.value = false;
-    return;
+function sideLines(block: MergeBlock, side: SideName) {
+  const range = sideRange(block, side);
+  return lines[side].slice(range.start, range.end);
+}
+
+function baseLines(block: MergeBlock) {
+  return lines.base.slice(block.base.start, block.base.end);
+}
+
+function wordsOf(block: MergeBlock, side: SideName) {
+  const key = `${block.index}:${side}`;
+  let words = wordCache.get(key);
+  if (!words) {
+    const other: SideName = side === "ours" ? "theirs" : "ours";
+    const compare = block.base.start === block.base.end && block.conflict ? sideLines(block, other) : baseLines(block);
+    words = changedChars(sideLines(block, side).join("\n"), compare.join("\n"), settings.value.ignoreWhitespace);
+    wordCache.set(key, words);
   }
-  if ((event.ctrlKey || event.metaKey) && event.key === "F3") {
-    event.preventDefault();
-    runFind(event.shiftKey);
-    return;
+  return words;
+}
+
+function simpleOf(block: MergeBlock) {
+  if (!simpleCache.has(block.index)) {
+    simpleCache.set(
+      block.index,
+      resolveSimple(sideLines(block, "ours").join("\n"), baseLines(block).join("\n"), sideLines(block, "theirs").join("\n")),
+    );
   }
-  handleIdeEditorKey(event, {
-    onSave: applyCurrent,
-    onFind: () => {
-      findOpen.value = true;
-      findHint.value = "";
-    },
-    commentPrefix: commentPrefix(props.path),
+  return simpleCache.get(block.index) ?? null;
+}
+
+function untouched(block: MergeBlock) {
+  const state = snapshot.value.states[block.index];
+  return state?.ours === "pending" && state.theirs === "pending";
+}
+
+function sidePending(block: MergeBlock, side: SideName) {
+  return snapshot.value.states[block.index]?.[side] === "pending";
+}
+
+function refreshMarks() {
+  const words = settings.value.highlight === "words";
+  for (const side of ["ours", "theirs"] as const) {
+    const view = views[side];
+    if (!view) continue;
+    const marks: PaneMark[] = blocks.value
+      .filter((block) => sidePending(block, side))
+      .map((block) => ({ range: sideRange(block, side), kind: sideKind(block, side), words: words ? wordsOf(block, side) : [] }));
+    updateMarks(view, marks, words);
+  }
+  const view = views.result;
+  if (!view) return;
+  const marks: PaneMark[] = pendingBlocks.value.map((block) => ({
+    range: snapshot.value.ranges[block.index],
+    kind: block.conflict ? "conflict" : resultKind(block),
+    words: [],
+  }));
+  updateMarks(view, marks, false);
+}
+
+function scheduleDraw() {
+  if (drawFrame) return;
+  drawFrame = requestAnimationFrame(() => {
+    drawFrame = 0;
+    draw();
   });
 }
 
-function cancelMerge() {
-  if (props.busy) return;
-  if (!window.confirm("确定取消本次合并？工作区将恢复到合并前的状态。")) return;
-  emit("abort");
+function band(fromView: EditorView, from: LineRange, toView: EditorView, to: LineRange, top: number, height: number) {
+  const y = (view: EditorView, line: number) => lineTop(view, line) + view.documentTop - top;
+  const l0 = y(fromView, from.start);
+  const l1 = from.start === from.end ? l0 : y(fromView, from.end);
+  const r0 = y(toView, to.start);
+  const r1 = to.start === to.end ? r0 : y(toView, to.end);
+  if (Math.max(l1, r1) < -40 || Math.min(l0, r0) > height + 40) return null;
+  const m = DIVIDER / 2;
+  return {
+    d: `M0,${l0} C${m},${l0} ${m},${r0} ${DIVIDER},${r0} L${DIVIDER},${r1} C${m},${r1} ${m},${l1} 0,${l1} Z`,
+    l0,
+    r0,
+  };
 }
 
-function toggleFold(start: number) {
-  const next = new Set(expandedFolds.value);
-  if (next.has(start)) next.delete(start);
-  else next.add(start);
-  expandedFolds.value = next;
-}
-
-function escapeHtml(text: string) {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-function splitHighlighted(lines: string[], filePath: string): string[] {
-  if (!lines.length) return [];
-  const full = highlightCode(lines.join("\n"), filePath);
-  return splitHtmlLines(full);
-}
-
-function splitHtmlLines(html: string): string[] {
-  const result: string[] = [];
-  let current = "";
-  const openStack: string[] = [];
-  const tagRegex = /(<\/?[^>]+>)/g;
-  const parts = html.split(tagRegex).filter(Boolean);
-
-  for (const part of parts) {
-    if (part.startsWith("<")) {
-      if (part.startsWith("</")) {
-        openStack.pop();
-      } else if (!part.endsWith("/>")) {
-        openStack.push(part);
-      }
-      current += part;
-    } else {
-      const segments = part.split("\n");
-      for (let i = 0; i < segments.length; i++) {
-        if (i > 0) {
-          result.push(current);
-          current = openStack.join("");
-        }
-        current += segments[i];
-      }
+function draw() {
+  const { ours, result, theirs } = views;
+  if (!ours || !result || !theirs || !leftDivider.value || !rightDivider.value) return;
+  const leftRect = leftDivider.value.getBoundingClientRect();
+  const rightRect = rightDivider.value.getBoundingClientRect();
+  const left: Band[] = [];
+  const right: Band[] = [];
+  for (const block of blocks.value) {
+    const target = snapshot.value.ranges[block.index];
+    if (!target) continue;
+    if (sidePending(block, "ours")) {
+      const shape = band(ours, block.ours, result, target, leftRect.top, leftRect.height);
+      if (shape) left.push({ index: block.index, kind: sideKind(block, "ours"), d: shape.d, button: shape.l0 });
+    }
+    if (sidePending(block, "theirs")) {
+      const shape = band(result, target, theirs, block.theirs, rightRect.top, rightRect.height);
+      if (shape) right.push({ index: block.index, kind: sideKind(block, "theirs"), d: shape.d, button: shape.r0 });
     }
   }
-  result.push(current);
-  return result;
+  bands.value = { left, right };
 }
 
-interface WordSeg {
-  text: string;
-  type: "same" | "oursOnly" | "theirsOnly";
+function holdDriver(pane: Pane) {
+  scrollDriver = pane;
+  window.clearTimeout(scrollDriverTimer);
+  scrollDriverTimer = window.setTimeout(() => {
+    scrollDriver = null;
+  }, 90);
 }
 
-function tokenize(text: string): string[] {
-  return text.match(/\s+|\w+|[^\s\w]/g) ?? [];
+function centerLine(view: EditorView) {
+  const dom = view.scrollDOM;
+  return topLine(view, dom.scrollTop + dom.clientHeight / 2 - view.documentPadding.top);
 }
 
-function computeWordDiff(ours: string, theirs: string): WordSeg[] {
-  const a = tokenize(ours);
-  const b = tokenize(theirs);
-  const n = a.length;
-  const m = b.length;
+function scrollToLine(view: EditorView, line: number) {
+  const dom = view.scrollDOM;
+  dom.scrollTop = Math.max(0, heightOfLine(view, line) + view.documentPadding.top - dom.clientHeight / 2);
+}
 
-  if (n === 0 && m === 0) return [];
-  if (n === 0) return b.map((text) => ({ text, type: "theirsOnly" as const }));
-  if (m === 0) return a.map((text) => ({ text, type: "oursOnly" as const }));
-
-  const maxLen = Math.max(...a.map((t) => t.length), ...b.map((t) => t.length), 1);
-  if (n * m > 500000 || maxLen > 200) {
-    return a.map((text) => ({ text, type: "same" as const }));
+function onScroll(pane: Pane) {
+  scheduleDraw();
+  if (!settings.value.syncScroll) return;
+  if (scrollDriver && scrollDriver !== pane) return;
+  const source = views[pane];
+  if (!source) return;
+  holdDriver(pane);
+  const line = centerLine(source);
+  const resultLine = pane === "result" ? line : mapLine(pane === "ours" ? oursAnchors.value : theirsAnchors.value, line, "a");
+  for (const other of ["ours", "result", "theirs"] as Pane[]) {
+    const view = views[other];
+    if (!view || other === pane) continue;
+    const target = other === "result" ? resultLine : mapLine(other === "ours" ? oursAnchors.value : theirsAnchors.value, resultLine, "b");
+    scrollToLine(view, target);
+    view.scrollDOM.scrollLeft = source.scrollDOM.scrollLeft;
   }
+}
 
-  const dp: number[][] = Array.from({ length: n + 1 }, () => Array(m + 1).fill(0));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+function lineChange(view: EditorView, range: LineRange, next: string[]): ChangeSpec | null {
+  const doc = view.state.doc;
+  const text = next.join("\n");
+  if (range.start < range.end) {
+    const from = doc.line(range.start + 1).from;
+    if (range.end < doc.lines) return { from, to: doc.line(range.end + 1).from, insert: next.length ? `${text}\n` : "" };
+    if (next.length) return { from, to: doc.length, insert: text };
+    return { from: Math.max(0, from - 1), to: doc.length, insert: "" };
+  }
+  if (!next.length) return null;
+  if (range.start < doc.lines) return { from: doc.line(range.start + 1).from, insert: `${text}\n` };
+  return { from: doc.length, insert: `\n${text}` };
+}
+
+function commit(states: SideStates[], edits: Map<number, string[]>) {
+  const view = views.result;
+  if (!view || !mergeField) return;
+  const before = view.state.field(mergeField);
+  const changes: ChangeSpec[] = [];
+  const ranges: LineRange[] = [];
+  let delta = 0;
+  before.ranges.forEach((range, index) => {
+    const next = edits.get(index);
+    const start = range.start + delta;
+    if (!next) {
+      ranges.push({ start, end: range.end + delta });
+      return;
     }
-  }
-
-  const segs: WordSeg[] = [];
-  let i = 0;
-  let j = 0;
-  while (i < n && j < m) {
-    if (a[i] === b[j]) {
-      segs.push({ text: a[i], type: "same" });
-      i++;
-      j++;
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-      segs.push({ text: a[i], type: "oursOnly" });
-      i++;
-    } else {
-      segs.push({ text: b[j], type: "theirsOnly" });
-      j++;
-    }
-  }
-  while (i < n) {
-    segs.push({ text: a[i], type: "oursOnly" });
-    i++;
-  }
-  while (j < m) {
-    segs.push({ text: b[j], type: "theirsOnly" });
-    j++;
-  }
-  return segs;
+    const change = lineChange(view, range, next);
+    if (change) changes.push(change);
+    ranges.push({ start, end: start + next.length });
+    delta += next.length - (range.end - range.start);
+  });
+  view.dispatch({
+    changes,
+    effects: setMerge.of({ ranges, states }),
+    annotations: isolateHistory.of("full"),
+    userEvent: "input.merge",
+  });
 }
 
-function renderWordHtml(segs: WordSeg[], side: "ours" | "theirs"): string {
-  const includeType = side === "ours" ? "oursOnly" : "theirsOnly";
-  return segs
-    .filter((s) => s.type === "same" || s.type === includeType)
-    .map((s) => {
-      const text = escapeHtml(s.text);
-      if (s.type === includeType && s.text.trim()) {
-        return `<span class="wd">${text}</span>`;
-      }
-      return text;
-    })
-    .join("");
+function cloneStates() {
+  return snapshot.value.states.map((state) => ({ ...state }));
 }
+
+function apply(block: MergeBlock, side: SideName) {
+  const states = cloneStates();
+  const state = states[block.index];
+  const other: SideName = side === "ours" ? "theirs" : "ours";
+  let next = sideLines(block, side);
+  if (block.conflict) {
+    if (state[other] === "applied") next = [...sideLines(block, other), ...next];
+    state[side] = "applied";
+  } else {
+    state.ours = block.oursChanged ? "applied" : "none";
+    state.theirs = block.theirsChanged ? "applied" : "none";
+  }
+  current.value = block.index;
+  commit(states, new Map([[block.index, next]]));
+}
+
+function ignore(block: MergeBlock, side: SideName) {
+  const states = cloneStates();
+  states[block.index][side] = "ignored";
+  if (!block.conflict) {
+    const other: SideName = side === "ours" ? "theirs" : "ours";
+    if (states[block.index][other] === "pending") states[block.index][other] = "ignored";
+  }
+  current.value = block.index;
+  commit(states, new Map());
+}
+
+function onBandClick(index: number, side: SideName, action: "apply" | "ignore") {
+  const block = blocks.value[index];
+  if (!block) return;
+  if (action === "apply") apply(block, side);
+  else ignore(block, side);
+}
+
+function applyNonConflicting(which: SideName | "all") {
+  const states = cloneStates();
+  const edits = new Map<number, string[]>();
+  for (const block of pendingBlocks.value) {
+    if (block.conflict) continue;
+    const side: SideName = block.oursChanged ? "ours" : "theirs";
+    if (which !== "all" && !(which === "ours" ? block.oursChanged : block.theirsChanged)) continue;
+    edits.set(block.index, sideLines(block, side));
+    states[block.index] = {
+      ours: block.oursChanged ? "applied" : "none",
+      theirs: block.theirsChanged ? "applied" : "none",
+    };
+  }
+  if (edits.size) commit(states, edits);
+}
+
+function resolveSimpleConflicts() {
+  const states = cloneStates();
+  const edits = new Map<number, string[]>();
+  for (const block of pendingBlocks.value) {
+    if (!block.conflict || !untouched(block)) continue;
+    const merged = simpleOf(block);
+    if (merged === null) continue;
+    edits.set(block.index, merged === "" && !sideLines(block, "ours").length ? [] : merged.split("\n"));
+    states[block.index] = { ours: "applied", theirs: "applied" };
+  }
+  if (!edits.size) {
+    notify("没有可以自动解决的简单冲突", "error");
+    return;
+  }
+  commit(states, edits);
+  notify(`已自动解决 ${edits.size} 个简单冲突`);
+}
+
+function go(delta: number) {
+  const list = pendingBlocks.value;
+  const target = delta > 0 ? list.find((block) => block.index > current.value) : [...list].reverse().find((block) => block.index < current.value);
+  if (target) reveal(target);
+}
+
+function reveal(block: MergeBlock) {
+  const view = views.result;
+  const range = snapshot.value.ranges[block.index];
+  if (!view || !range) return;
+  current.value = block.index;
+  const doc = view.state.doc;
+  const pos = doc.line(Math.min(doc.lines, range.start + 1)).from;
+  holdDriver("result");
+  view.dispatch({ selection: { anchor: pos }, effects: EditorView.scrollIntoView(pos, { y: "center" }) });
+  view.focus();
+}
+
+function revealIndex(index: number) {
+  const block = blocks.value[index];
+  if (block) reveal(block);
+}
+
+function stripeStyle(range: LineRange, total: number) {
+  const span = Math.max(1, total);
+  return {
+    top: `${(Math.min(range.start, span) / span) * 100}%`,
+    height: `max(3px, ${((range.end - range.start) / span) * 100}%)`,
+  };
+}
+
+function stripeMarks(pane: Pane) {
+  if (pane === "result") {
+    return pendingBlocks.value.map((block) => ({
+      index: block.index,
+      kind: block.conflict ? "conflict" : resultKind(block),
+      range: snapshot.value.ranges[block.index],
+      total: lineCounts.value.result,
+    }));
+  }
+  return blocks.value
+    .filter((block) => sidePending(block, pane))
+    .map((block) => ({ index: block.index, kind: sideKind(block, pane), range: sideRange(block, pane), total: lineCounts.value[pane] }));
+}
+
+function resultText() {
+  return views.result?.state.doc.toString() ?? "";
+}
+
+function dirty() {
+  if (!views.result) return false;
+  const initial = initialSnapshot(blocks.value).states;
+  return resultText() !== baseText || snapshot.value.states.some((state, index) => state.ours !== initial[index].ours || state.theirs !== initial[index].theirs);
+}
+
+function applyCurrent() {
+  if (props.busy || !editable.value || !views.result) return;
+  if (pendingConflicts.value > 0 && !window.confirm(`还有 ${pendingConflicts.value} 个冲突未处理，将按结果栏当前内容保存，确定应用？`)) return;
+  emit("save", { path: props.path, content: resultText() });
+}
+
+function acceptSide(side: SideName) {
+  if (props.busy || !editable.value) return;
+  emit("save", { path: props.path, content: lines[side].join("\n") });
+}
+
+function goBack() {
+  if (dirty() && !window.confirm("当前文件的合并结果尚未应用，关闭后将丢失，确定关闭？")) return;
+  emit("back");
+}
+
+function changeIgnoreWhitespace(event: Event) {
+  const target = event.target as HTMLSelectElement;
+  const next = target.value === "ignore";
+  if (dirty() && !window.confirm("切换空白处理方式会重新计算差异，当前文件的处理进度将丢失，确定继续？")) {
+    target.value = settings.value.ignoreWhitespace ? "ignore" : "none";
+    return;
+  }
+  settings.value.ignoreWhitespace = next;
+  mountEditors();
+}
+
+function openFind() {
+  if (views.result) openSearchPanel(views.result);
+}
+
+function onPageKey(event: KeyboardEvent) {
+  if (event.defaultPrevented) return;
+  if (event.key === "F7") {
+    event.preventDefault();
+    go(event.shiftKey ? -1 : 1);
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    if (settingsOpen.value) settingsOpen.value = false;
+    else goBack();
+  }
+}
+
+function closeSettings(event: MouseEvent) {
+  if (settingsOpen.value && !(event.target as HTMLElement).closest(".mrg-settings")) settingsOpen.value = false;
+}
+
+function onResize() {
+  scheduleDraw();
+}
+
+onMounted(() => {
+  window.addEventListener("keydown", onPageKey);
+  window.addEventListener("resize", onResize);
+});
+
+onUnmounted(() => {
+  window.removeEventListener("keydown", onPageKey);
+  window.removeEventListener("resize", onResize);
+  window.clearTimeout(scrollDriverTimer);
+  cancelAnimationFrame(drawFrame);
+  destroyEditors();
+});
 </script>
 
 <template>
   <Teleport to="body">
-    <div class="page">
-      <header class="toolbar">
-        <button type="button" class="tb-btn back-btn" title="返回冲突列表 (Esc)" @click="goBack">
-          <Icons name="arrow-left" :size="14" />
-          <span>返回</span>
-        </button>
-        <div class="tb-sep" />
-        <button type="button" class="tb-btn" title="上一个冲突" :disabled="!canGoUp" @click="goHunk(-1)">
-          <Icons name="arrow-up" :size="14" />
-        </button>
-        <button type="button" class="tb-btn" title="下一个冲突" :disabled="!canGoDown" @click="goHunk(1)">
-          <Icons name="arrow-down" :size="14" />
-        </button>
-        <div class="tb-sep" />
-        <div class="conflict-badge" :class="{ resolved: conflictCount === 0 }">
-          <span v-if="conflictCount > 0" class="badge-icon">&#x26A0;</span>
-          <span v-else class="badge-icon">&#x2713;</span>
-          <span v-if="conflictCount > 0">{{ conflictCount }} 处冲突待处理</span>
-          <span v-else>所有冲突已处理</span>
-          <span v-if="totalConflicts > 0" class="badge-progress">{{ resolvedCount }}/{{ totalConflicts }}</span>
-        </div>
-        <button
-          type="button"
-          class="tb-btn apply-btn"
-          :disabled="busy || !nonConflictCount"
-          title="自动应用所有非冲突更改"
-          @click="applyNonConflicts"
-        >
-          <Icons name="apply-both" :size="14" />
-          <span>应用非冲突</span>
-        </button>
-        <div class="tb-sep" />
-        <span class="tb-label">覆盖全部:</span>
-        <button
-          type="button"
-          class="tb-btn cover-btn"
-          :class="{ on: overwrite === 'ours' }"
-          :disabled="busy"
-          title="用本地版本覆盖全部"
-          @click="coverAll('ours')"
-        >
-          本地
-        </button>
-        <button
-          type="button"
-          class="tb-btn cover-btn"
-          :class="{ on: overwrite === 'theirs' }"
-          :disabled="busy"
-          title="用传入版本覆盖全部"
-          @click="coverAll('theirs')"
-        >
-          传入
-        </button>
-        <span class="file-path" :title="path">{{ path }}</span>
-        <label class="tb-check">
-          <input v-model="showBlame" type="checkbox" />
-          <span>Blame</span>
-        </label>
-        <label class="tb-check">
-          <input :checked="ignoreWhitespace" type="checkbox" @change="toggleIgnoreWhitespace" />
-          <span>忽略空白</span>
-        </label>
-        <span class="tb-count">{{ hunks.length }} 个更改</span>
-      </header>
-
-      <p v-if="error" class="err">{{ error }}</p>
-      <p v-else-if="loading" class="empty-hint">正在加载三端内容和行历史…</p>
-      <div v-else-if="content?.binary" class="empty-hint">二进制文件请返回列表后使用「使用您的」或「使用他们的」</div>
-      <div v-else-if="content?.tooLarge" class="empty-hint">
-        文件超过 512KB，无法在此合并，请返回列表后使用「使用您的」或「使用他们的」
+    <div class="mrg-page" @mousedown="closeSettings">
+      <div class="mrg-title">
+        <span>合并修订</span>
+        <span class="mrg-title-path" :title="`${repoPath}/${path}`">{{ repoPath.replace(/\\/g, "/") }}/{{ path }}</span>
       </div>
-      <div v-else class="workspace">
-        <section class="pane-col ours-col">
-          <div class="pane-head ours-head">
-            <span class="head-badge ours-badge">本地</span>
-            <span class="head-branch">{{ state.ours }}</span>
-          </div>
-          <div ref="oursPane" class="pane-body" @scroll="syncScroll">
-            <template v-for="(vr, vi) in viewerRows" :key="`o-${vi}`">
-              <div v-if="vr.isFold" class="fold-bar" @click="toggleFold(vr.start)">
-                <span class="fold-icon">&#x22EE;</span>
-                <span class="fold-text">
-                  {{ expandedFolds.has(vr.start) ? `收起 ${vr.count} 行未更改` : `${vr.count} 行未更改，点击展开` }}
-                </span>
-              </div>
-              <div
-                v-else
-                class="line"
-                :class="[vr.oursKind, { current: vr.hunk?.start === hunks[currentHunk]?.start, 'conflict-border': vr.conflictBorder }]"
-                :title="formatBlame(vr.oursBlame)"
-              >
-                <span class="no">{{ vr.oursNo }}</span>
-                <span v-if="showBlame" class="blame" :title="formatBlame(vr.oursBlame)">{{ vr.blameOursAnno }}</span>
-                <span class="code" v-html="vr.oursHtml" />
-              </div>
-            </template>
-          </div>
-        </section>
 
-        <section class="gutter-col">
-          <div class="gutter-head" />
-          <div ref="leftGutter" class="gutter-body" @scroll="syncScroll">
-            <template v-for="(vr, vi) in viewerRows" :key="`lg-${vi}`">
-              <div v-if="vr.isFold" class="fold-gutter" />
-              <div v-else class="gutter-row" :class="{ 'hunk-start': vr.hunkStart }">
-                <template v-if="vr.hunkStart && vr.hunk?.ours && !sideSettled(vr.hunk, 'ours')">
-                  <button type="button" class="accept-btn" title="接受本地此段 (»)" @click.stop="acceptHunk(vr.hunk!, 'ours')">
-                    <svg viewBox="0 0 12 12" width="12" height="12"><path d="M3 1 L8 6 L3 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                  </button>
-                  <button type="button" class="reject-btn" title="舍弃本地此段" @click.stop="rejectHunk(vr.hunk!, 'ours')">
-                    <svg viewBox="0 0 12 12" width="10" height="10"><path d="M2 2 L10 10 M10 2 L2 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-                  </button>
-                </template>
-              </div>
-            </template>
-          </div>
-        </section>
-
-        <section class="pane-col result-col">
-          <div class="pane-head result-head">
-            <span class="head-badge result-badge">结果</span>
-            <span v-if="findOpen" class="findbar">
-              <input
-                v-model="findQuery"
-                placeholder="查找…"
-                @keydown.enter.prevent="runFind($event.shiftKey)"
-                @keydown.escape.prevent="findOpen = false"
+      <div class="mrg-toolbar">
+        <button type="button" class="mrg-icon" title="上一个差异 (Shift+F7)" :disabled="!canPrev" @click="go(-1)">
+          <svg viewBox="0 0 16 16"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" /></svg>
+        </button>
+        <button type="button" class="mrg-icon" title="下一个差异 (F7)" :disabled="!canNext" @click="go(1)">
+          <svg viewBox="0 0 16 16"><path d="M8 3v10M3.5 8.5 8 13l4.5-4.5" /></svg>
+        </button>
+        <span class="mrg-sep" />
+        <button
+          type="button"
+          class="mrg-icon"
+          title="应用左侧的非冲突更改"
+          :disabled="busy || !nonConflicting.ours"
+          @click="applyNonConflicting('ours')"
+        >
+          <svg viewBox="0 0 16 16"><path d="M2 4l4 4-4 4M7 4l4 4-4 4M14 3v10" /></svg>
+        </button>
+        <button
+          type="button"
+          class="mrg-icon"
+          title="应用所有非冲突更改"
+          :disabled="busy || !nonConflicting.all"
+          @click="applyNonConflicting('all')"
+        >
+          <svg viewBox="0 0 16 16"><path d="M1.5 4.5l3.5 3.5-3.5 3.5M14.5 4.5 11 8l3.5 3.5M8 3v10" /></svg>
+        </button>
+        <button
+          type="button"
+          class="mrg-icon"
+          title="应用右侧的非冲突更改"
+          :disabled="busy || !nonConflicting.theirs"
+          @click="applyNonConflicting('theirs')"
+        >
+          <svg viewBox="0 0 16 16"><path d="M14 4l-4 4 4 4M9 4 5 8l4 4M2 3v10" /></svg>
+        </button>
+        <button
+          type="button"
+          class="mrg-icon"
+          title="解决简单冲突"
+          :disabled="busy || !canResolveSimple"
+          @click="resolveSimpleConflicts"
+        >
+          <svg viewBox="0 0 16 16"><path d="M2.5 13.5 10 6M9 3.5V1.5M12.5 7h2M11.5 4.5 13 3M4.5 2.5l.6 1.4 1.4.6-1.4.6-.6 1.4-.6-1.4L2.5 4.5l1.4-.6z" /></svg>
+        </button>
+        <span class="mrg-sep" />
+        <select class="mrg-combo" :value="settings.ignoreWhitespace ? 'ignore' : 'none'" title="空白处理" @change="changeIgnoreWhitespace">
+          <option value="none">不忽略</option>
+          <option value="ignore">忽略空白</option>
+        </select>
+        <select v-model="settings.highlight" class="mrg-combo" title="高亮方式">
+          <option value="words">高亮显示单词</option>
+          <option value="lines">高亮显示行</option>
+        </select>
+        <span class="mrg-sep" />
+        <button
+          type="button"
+          class="mrg-icon"
+          :class="{ on: settings.syncScroll }"
+          title="同步滚动"
+          @click="settings.syncScroll = !settings.syncScroll"
+        >
+          <svg viewBox="0 0 16 16"><path d="M5 2v12M2.5 4.5 5 2l2.5 2.5M2.5 11.5 5 14l2.5-2.5M11 2v12M8.5 4.5 11 2l2.5 2.5M8.5 11.5 11 14l2.5-2.5" /></svg>
+        </button>
+        <button type="button" class="mrg-icon" title="查找 (Ctrl+F)" @click="openFind">
+          <svg viewBox="0 0 16 16"><path d="M10.5 10.5 14 14M11.5 6.5a5 5 0 1 1-10 0 5 5 0 0 1 10 0z" /></svg>
+        </button>
+        <span class="mrg-settings">
+          <button type="button" class="mrg-icon" :class="{ on: settingsOpen }" title="设置" @click="settingsOpen = !settingsOpen">
+            <svg viewBox="0 0 16 16">
+              <path d="M8 10.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4z" />
+              <path
+                d="M6.8 1.5h2.4l.4 1.9 1.3.7 1.8-.7 1.2 2.1-1.4 1.3v1.4l1.4 1.3-1.2 2.1-1.8-.7-1.3.7-.4 1.9H6.8l-.4-1.9-1.3-.7-1.8.7-1.2-2.1 1.4-1.3V6.8L2.1 5.5l1.2-2.1 1.8.7 1.3-.7z"
               />
-              <button type="button" title="上一个 (Shift+F3)" @click="runFind(true)">
-                <Icons name="arrow-up" :size="12" />
-              </button>
-              <button type="button" title="下一个 (F3)" @click="runFind(false)">
-                <Icons name="arrow-down" :size="12" />
-              </button>
-              <em v-if="findHint">{{ findHint }}</em>
-            </span>
+            </svg>
+          </button>
+          <div v-if="settingsOpen" class="mrg-menu">
+            <label><input v-model="settings.blame" type="checkbox" /> 显示 Blame 注释</label>
+            <label><input v-model="settings.syncScroll" type="checkbox" /> 同步滚动</label>
           </div>
-          <div ref="resultPane" class="pane-body result-pane-body" @scroll="syncScroll">
-            <div class="result-wrap">
-              <div class="result-lines-col">
-                <div v-for="n in resultLineCount" :key="n" class="result-no">{{ n }}</div>
-              </div>
-              <textarea
-                ref="resultEditor"
-                class="result-editor"
-                spellcheck="false"
-                :style="{ minHeight: `${resultLineCount * 18}px` }"
-                @input="onResultInput"
-                @keydown="onResultKey"
+        </span>
+        <span class="mrg-spacer" />
+        <span class="mrg-status" :class="{ conflict: pendingConflicts > 0 }">{{ statusText }}</span>
+      </div>
+
+      <div v-if="allDone" class="mrg-banner">
+        <span>所有更改均已处理。</span>
+        <a href="#" @click.prevent="applyCurrent">保存更改并完成合并</a>
+      </div>
+
+      <p v-if="error" class="mrg-hint err">{{ error }}</p>
+      <p v-else-if="loading" class="mrg-hint">正在加载三方内容…</p>
+      <p v-else-if="content?.binary" class="mrg-hint">二进制文件无法逐行合并，请使用底部的「接受左侧」或「接受右侧」</p>
+      <p v-else-if="content?.tooLarge" class="mrg-hint">文件超过 512KB，无法在此合并，请使用底部的「接受左侧」或「接受右侧」</p>
+
+      <div v-show="editable && !loading" class="mrg-work">
+        <section class="mrg-col">
+          <div class="mrg-head">您的版本<b v-if="state.ours">{{ state.ours }}</b></div>
+          <div class="mrg-body">
+            <div class="mrg-stripe">
+              <i
+                v-for="mark in stripeMarks('ours')"
+                :key="mark.index"
+                :class="`mrg-${mark.kind}`"
+                :style="stripeStyle(mark.range, mark.total)"
+                @click="revealIndex(mark.index)"
+              />
+            </div>
+            <div ref="oursHost" class="mrg-host" />
+          </div>
+        </section>
+
+        <section class="mrg-divider">
+          <div class="mrg-head" />
+          <div ref="leftDivider" class="mrg-divider-body">
+            <svg :width="DIVIDER" height="100%">
+              <path v-for="item in bands.left" :key="item.index" :class="`mrg-band mrg-${item.kind}`" :d="item.d" />
+            </svg>
+            <div v-for="item in bands.left" :key="`b${item.index}`" class="mrg-actions left" :style="{ top: `${item.button}px` }">
+              <button type="button" class="mrg-act apply" title="应用 (»)" :disabled="busy" @click="onBandClick(item.index, 'ours', 'apply')">»</button>
+              <button type="button" class="mrg-act ignore" title="忽略 (×)" :disabled="busy" @click="onBandClick(item.index, 'ours', 'ignore')">×</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="mrg-col">
+          <div class="mrg-head center">结果</div>
+          <div class="mrg-body">
+            <div ref="resultHost" class="mrg-host" />
+            <div class="mrg-stripe">
+              <i
+                v-for="mark in stripeMarks('result')"
+                :key="mark.index"
+                :class="`mrg-${mark.kind}`"
+                :style="stripeStyle(mark.range, mark.total)"
+                @click="revealIndex(mark.index)"
               />
             </div>
           </div>
         </section>
 
-        <section class="gutter-col">
-          <div class="gutter-head" />
-          <div ref="rightGutter" class="gutter-body" @scroll="syncScroll">
-            <template v-for="(vr, vi) in viewerRows" :key="`rg-${vi}`">
-              <div v-if="vr.isFold" class="fold-gutter" />
-              <div v-else class="gutter-row" :class="{ 'hunk-start': vr.hunkStart }">
-                <template v-if="vr.hunkStart && vr.hunk?.theirs && !sideSettled(vr.hunk, 'theirs')">
-                  <button type="button" class="accept-btn" title="接受传入此段 («)" @click.stop="acceptHunk(vr.hunk!, 'theirs')">
-                    <svg viewBox="0 0 12 12" width="12" height="12"><path d="M9 1 L4 6 L9 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                  </button>
-                  <button type="button" class="reject-btn" title="舍弃传入此段" @click.stop="rejectHunk(vr.hunk!, 'theirs')">
-                    <svg viewBox="0 0 12 12" width="10" height="10"><path d="M2 2 L10 10 M10 2 L2 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-                  </button>
-                </template>
-              </div>
-            </template>
+        <section class="mrg-divider">
+          <div class="mrg-head" />
+          <div ref="rightDivider" class="mrg-divider-body">
+            <svg :width="DIVIDER" height="100%">
+              <path v-for="item in bands.right" :key="item.index" :class="`mrg-band mrg-${item.kind}`" :d="item.d" />
+            </svg>
+            <div v-for="item in bands.right" :key="`b${item.index}`" class="mrg-actions right" :style="{ top: `${item.button}px` }">
+              <button type="button" class="mrg-act ignore" title="忽略 (×)" :disabled="busy" @click="onBandClick(item.index, 'theirs', 'ignore')">×</button>
+              <button type="button" class="mrg-act apply" title="应用 («)" :disabled="busy" @click="onBandClick(item.index, 'theirs', 'apply')">«</button>
+            </div>
           </div>
         </section>
 
-        <section class="pane-col theirs-col">
-          <div class="pane-head theirs-head">
-            <span class="head-badge theirs-badge">传入</span>
-            <span class="head-branch">{{ state.theirs }}</span>
-          </div>
-          <div ref="theirsPane" class="pane-body" @scroll="syncScroll">
-            <template v-for="(vr, vi) in viewerRows" :key="`t-${vi}`">
-              <div v-if="vr.isFold" class="fold-bar" @click="toggleFold(vr.start)">
-                <span class="fold-icon">&#x22EE;</span>
-                <span class="fold-text">
-                  {{ expandedFolds.has(vr.start) ? `收起 ${vr.count} 行未更改` : `${vr.count} 行未更改，点击展开` }}
-                </span>
-              </div>
-              <div
-                v-else
-                class="line"
-                :class="[vr.theirsKind, { current: vr.hunk?.start === hunks[currentHunk]?.start, 'conflict-border': vr.conflictBorder }]"
-                :title="formatBlame(vr.theirsBlame)"
-              >
-                <span class="no">{{ vr.theirsNo }}</span>
-                <span v-if="showBlame" class="blame" :title="formatBlame(vr.theirsBlame)">{{ vr.blameTheirsAnno }}</span>
-                <span class="code" v-html="vr.theirsHtml" />
-              </div>
-            </template>
+        <section class="mrg-col">
+          <div class="mrg-head">来自 <b>{{ state.theirs || "传入" }}</b> 的更改</div>
+          <div class="mrg-body">
+            <div ref="theirsHost" class="mrg-host" />
+            <div class="mrg-stripe">
+              <i
+                v-for="mark in stripeMarks('theirs')"
+                :key="mark.index"
+                :class="`mrg-${mark.kind}`"
+                :style="stripeStyle(mark.range, mark.total)"
+                @click="revealIndex(mark.index)"
+              />
+            </div>
           </div>
         </section>
       </div>
+      <div v-if="!editable || loading" class="mrg-fill" />
 
-      <footer class="foot">
-        <button type="button" class="secondary-btn" @click="goBack">返回列表</button>
-        <span class="spacer" />
-        <button
-          type="button"
-          class="primary-btn apply-current"
-          :disabled="busy || !editable"
-          :title="conflictCount > 0 ? `还有 ${conflictCount} 处冲突未通过按钮处理` : ''"
-          @click="applyCurrent"
-        >
-          <Icons name="check" :size="14" />
-          应用
-        </button>
-        <button type="button" class="secondary-btn" :disabled="busy" @click="cancelMerge">取消合并</button>
+      <footer class="mrg-foot">
+        <span
+          class="mrg-help"
+          title="F7 / Shift+F7：下一个 / 上一个差异&#10;» «：应用这一侧的更改，冲突时先后点两侧可都保留&#10;×：忽略这一侧的更改&#10;Ctrl+S：应用　Ctrl+F：查找　Ctrl+Z：撤销&#10;Esc：取消"
+        >?</span>
+        <button type="button" class="mrg-btn" :disabled="busy || !content" @click="acceptSide('ours')">接受左侧</button>
+        <button type="button" class="mrg-btn" :disabled="busy || !content" @click="acceptSide('theirs')">接受右侧</button>
+        <span class="mrg-spacer" />
+        <button type="button" class="mrg-btn" :disabled="busy" @click="goBack">取消</button>
+        <button type="button" class="mrg-btn primary" :disabled="busy || !editable" @click="applyCurrent">应用</button>
       </footer>
-    </div>
-
-    <div v-if="completeOpen" class="complete-mask" @mousedown.self="completeOpen = false">
-      <div class="complete-box">
-        <div class="complete-icon">&#x2713;</div>
-        <h3>冲突已全部处理</h3>
-        <p>当前文件的冲突已处理完，可以点击「应用」保存结果。</p>
-        <button type="button" class="primary-btn" @click="completeOpen = false">确定</button>
-      </div>
     </div>
   </Teleport>
 </template>
 
-<style scoped>
-.page {
+<style>
+.mrg-page {
+  --mrg-conflict: #4a2f2d;
+  --mrg-conflict-word: #6e403b;
+  --mrg-conflict-edge: #c75450;
+  --mrg-mod: #2c3a4b;
+  --mrg-mod-word: #3d5573;
+  --mrg-mod-edge: #4d7bb8;
+  --mrg-add: #29412f;
+  --mrg-add-word: #3a5e44;
+  --mrg-add-edge: #4f9c5c;
+  --mrg-del: #3b3d40;
+  --mrg-del-word: #50545a;
+  --mrg-del-edge: #868a91;
+  --tok-keyword: #cf8e6d;
+  --tok-string: #6aab73;
+  --tok-number: #2aacb8;
+  --tok-comment: #7a7e85;
+  --tok-type: #d5b778;
+  --tok-property: #c77dbb;
+  --tok-meta: #b3ae60;
+  --tok-func: #56a8f5;
   position: fixed;
   inset: 0;
   z-index: 1250;
   display: flex;
   flex-direction: column;
   background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
 }
 
-/* ── Toolbar ────────────────────────────────────────── */
-.toolbar,
-.foot {
+html[data-theme="light"] .mrg-page {
+  --mrg-conflict: #ffe1dc;
+  --mrg-conflict-word: #ffbfb5;
+  --mrg-conflict-edge: #e0574a;
+  --mrg-mod: #e3edfb;
+  --mrg-mod-word: #c2d7f6;
+  --mrg-mod-edge: #5d8fd8;
+  --mrg-add: #dff3e2;
+  --mrg-add-word: #b9e3c0;
+  --mrg-add-edge: #57ad66;
+  --mrg-del: #ebebec;
+  --mrg-del-word: #d4d5d8;
+  --mrg-del-edge: #a2a5ab;
+  --tok-keyword: #0033b3;
+  --tok-string: #067d17;
+  --tok-number: #1750eb;
+  --tok-comment: #8c8c8c;
+  --tok-type: #0033b3;
+  --tok-property: #871094;
+  --tok-meta: #9e880d;
+  --tok-func: #00627a;
+}
+
+.mrg-title {
   flex: none;
+  height: 30px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  min-height: 38px;
-  padding: 0 10px;
+  gap: 8px;
+  padding: 0 12px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-hover);
 }
 
-.foot {
-  border-bottom: 0;
-  border-top: 1px solid var(--border);
-}
-
-.tb-btn {
-  height: 26px;
-  padding: 0 8px;
-  border-radius: 4px;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--text-muted);
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.tb-btn:hover:not(:disabled) {
-  background: var(--bg-selected);
-  color: var(--text);
-}
-
-.back-btn {
-  font-weight: 500;
-}
-
-.tb-sep {
-  width: 1px;
-  height: 18px;
-  background: var(--border-soft);
-  margin: 0 2px;
-}
-
-.conflict-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 26px;
-  padding: 0 10px;
-  border-radius: 4px;
-  background: rgba(224, 108, 117, 0.15);
-  color: var(--danger);
-  font-weight: 600;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.conflict-badge.resolved {
-  background: rgba(152, 195, 121, 0.15);
-  color: var(--ok);
-}
-
-.badge-icon {
-  font-size: 14px;
-}
-
-.badge-progress {
-  color: var(--text-muted);
-  font-weight: 400;
-  margin-left: 2px;
-}
-
-.apply-btn {
-  color: var(--accent);
-}
-
-.apply-btn:hover:not(:disabled) {
-  background: rgba(53, 116, 240, 0.12);
-  color: var(--accent);
-}
-
-.tb-label {
-  color: var(--text-muted);
-  font-size: 11px;
-  margin-left: 2px;
-}
-
-.cover-btn {
-  border: 1px solid var(--border-soft);
-  background: var(--bg-input);
-}
-
-.cover-btn.on,
-.cover-btn:hover:not(:disabled) {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-}
-
-.file-path {
-  flex: 1;
+.mrg-title-path {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-muted);
-  text-align: center;
-  font-size: 12px;
 }
 
-.tb-check {
+.mrg-toolbar {
+  flex: none;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.mrg-icon {
+  width: 24px;
+  height: 24px;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  justify-content: center;
+  border-radius: 4px;
   color: var(--text-muted);
-  font-size: 11px;
+}
+
+.mrg-icon svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.mrg-icon:hover:not(:disabled),
+.mrg-icon.on {
+  background: var(--bg-selected);
+  color: var(--text);
+}
+
+.mrg-icon:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.mrg-sep {
+  width: 1px;
+  height: 16px;
+  margin: 0 4px;
+  background: var(--border-soft);
+}
+
+.mrg-combo {
+  height: 24px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mrg-combo:hover {
+  background: var(--bg-selected);
+  color: var(--text);
+}
+
+.mrg-combo option {
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+.mrg-settings {
+  position: relative;
+}
+
+.mrg-menu {
+  position: absolute;
+  top: 28px;
+  left: 0;
+  z-index: 5;
+  min-width: 160px;
+  padding: 6px 0;
+  border: 1px solid var(--border-elevated);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow);
+}
+
+.mrg-menu label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
   white-space: nowrap;
   cursor: pointer;
 }
 
-.tb-count {
-  color: var(--text-dim);
-  font-size: 11px;
+.mrg-menu label:hover {
+  background: var(--bg-selected);
+}
+
+.mrg-spacer {
+  flex: 1;
+}
+
+.mrg-status {
+  padding-right: 8px;
+  color: var(--text-muted);
   white-space: nowrap;
 }
 
-/* ── Workspace Grid ─────────────────────────────────── */
-.workspace {
+.mrg-banner {
+  flex: none;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--mrg-add);
+}
+
+.mrg-banner a {
+  color: var(--accent);
+}
+
+.mrg-hint {
+  margin: 0;
+  padding: 24px;
+  color: var(--text-muted);
+}
+
+.mrg-hint.err {
+  color: var(--danger);
+}
+
+.mrg-fill {
+  flex: 1;
+}
+
+.mrg-work {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 36px minmax(0, 1fr) 36px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) 30px minmax(0, 1fr) 30px minmax(0, 1fr);
 }
 
-.pane-col,
-.gutter-col {
+.mrg-col,
+.mrg-divider {
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
-.pane-head {
+.mrg-head {
   flex: none;
-  height: 30px;
+  height: 26px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 10px;
+  gap: 6px;
+  padding: 0 8px;
+  overflow: hidden;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-hover);
+  color: var(--text-muted);
+}
+
+.mrg-head b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.mrg-head.center {
+  justify-content: center;
+}
+
+.mrg-divider .mrg-head {
+  padding: 0;
+}
+
+.mrg-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.mrg-host {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.mrg-host .cm-editor {
+  height: 100%;
+  background: var(--bg-deep);
+  color: var(--text-editor);
   font-size: 12px;
 }
 
-.ours-head {
-  background: var(--diff-ours-head);
+.mrg-host .cm-editor.cm-focused {
+  outline: none;
 }
 
-.result-head {
-  background: var(--diff-base-head);
-  justify-content: space-between;
+.mrg-host .cm-scroller {
+  font-family: "JetBrains Mono", Consolas, "Courier New", monospace;
+  line-height: 18px;
 }
 
-.theirs-head {
-  background: var(--diff-theirs-head);
+.mrg-host .cm-content {
+  caret-color: var(--text);
 }
 
-.head-badge {
-  display: inline-flex;
-  align-items: center;
-  height: 20px;
-  padding: 0 8px;
-  border-radius: 3px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
+.mrg-host .cm-cursor {
+  border-left-color: var(--text);
 }
 
-.ours-badge {
-  background: rgba(53, 116, 240, 0.2);
-  color: #6da3f7;
+.mrg-host .cm-gutters {
+  border: 0;
+  background: var(--bg-deep);
+  color: var(--text-dim);
 }
 
-.result-badge {
-  background: rgba(134, 138, 145, 0.2);
+.mrg-host .cm-lineNumbers .cm-gutterElement {
+  min-width: 32px;
+  padding: 0 8px 0 4px;
+}
+
+.mrg-host .cm-activeLine {
+  background: transparent;
+}
+
+.mrg-host .cm-focused .cm-activeLine {
+  background: var(--bg-hover);
+}
+
+.mrg-host .cm-activeLineGutter {
+  background: transparent;
   color: var(--text-muted);
 }
 
-.theirs-badge {
-  background: rgba(73, 156, 84, 0.2);
-  color: #6aab73;
+.mrg-host .cm-selectionBackground,
+.mrg-host .cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground {
+  background: rgba(53, 116, 240, 0.35);
 }
 
-.head-branch {
-  color: var(--text-muted);
-  font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.mrg-host .cm-selectionMatch {
+  background: rgba(53, 116, 240, 0.18);
 }
 
-.findbar {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+.mrg-host .cm-matchingBracket {
+  background: rgba(53, 116, 240, 0.25);
+  color: inherit;
 }
 
-.findbar input {
-  width: 140px;
-  height: 22px;
-  padding: 0 6px;
+.mrg-host .cm-panels {
+  background: var(--bg-hover);
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.mrg-host .cm-panel.cm-search {
+  padding: 4px 8px;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.mrg-host .cm-panel.cm-search input,
+.mrg-host .cm-panel.cm-search button {
+  font-size: 12px;
+}
+
+.mrg-host .cm-textfield {
   border: 1px solid var(--border-soft);
   border-radius: 4px;
   background: var(--bg-input);
   color: var(--text);
-  font-size: 12px;
 }
 
-.findbar button {
+.mrg-host .cm-button {
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: var(--bg-input);
+  background-image: none;
+  color: var(--text);
+}
+
+.mrg-host .cm-searchMatch {
+  background: rgba(255, 200, 50, 0.3);
+}
+
+.mrg-host .cm-searchMatch-selected {
+  background: rgba(255, 200, 50, 0.55);
+}
+
+.mrg-host .mrg-blame .cm-gutterElement {
+  padding: 0 8px 0 6px;
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.mrg-line.mrg-conflict { background: var(--mrg-conflict); }
+.mrg-line.mrg-mod { background: var(--mrg-mod); }
+.mrg-line.mrg-add { background: var(--mrg-add); }
+.mrg-line.mrg-del { background: var(--mrg-del); }
+.mrg-line.mrg-first.mrg-conflict { box-shadow: inset 0 1px 0 var(--mrg-conflict-edge); }
+.mrg-line.mrg-first.mrg-mod { box-shadow: inset 0 1px 0 var(--mrg-mod-edge); }
+.mrg-line.mrg-first.mrg-add { box-shadow: inset 0 1px 0 var(--mrg-add-edge); }
+.mrg-line.mrg-first.mrg-del { box-shadow: inset 0 1px 0 var(--mrg-del-edge); }
+.mrg-line.mrg-last.mrg-conflict { box-shadow: inset 0 -1px 0 var(--mrg-conflict-edge); }
+.mrg-line.mrg-last.mrg-mod { box-shadow: inset 0 -1px 0 var(--mrg-mod-edge); }
+.mrg-line.mrg-last.mrg-add { box-shadow: inset 0 -1px 0 var(--mrg-add-edge); }
+.mrg-line.mrg-last.mrg-del { box-shadow: inset 0 -1px 0 var(--mrg-del-edge); }
+.mrg-line.mrg-first.mrg-last.mrg-conflict { box-shadow: inset 0 1px 0 var(--mrg-conflict-edge), inset 0 -1px 0 var(--mrg-conflict-edge); }
+.mrg-line.mrg-first.mrg-last.mrg-mod { box-shadow: inset 0 1px 0 var(--mrg-mod-edge), inset 0 -1px 0 var(--mrg-mod-edge); }
+.mrg-line.mrg-first.mrg-last.mrg-add { box-shadow: inset 0 1px 0 var(--mrg-add-edge), inset 0 -1px 0 var(--mrg-add-edge); }
+.mrg-line.mrg-first.mrg-last.mrg-del { box-shadow: inset 0 1px 0 var(--mrg-del-edge), inset 0 -1px 0 var(--mrg-del-edge); }
+.mrg-gap-above.mrg-conflict { box-shadow: inset 0 2px 0 var(--mrg-conflict-edge); }
+.mrg-gap-above.mrg-mod { box-shadow: inset 0 2px 0 var(--mrg-mod-edge); }
+.mrg-gap-above.mrg-add { box-shadow: inset 0 2px 0 var(--mrg-add-edge); }
+.mrg-gap-above.mrg-del { box-shadow: inset 0 2px 0 var(--mrg-del-edge); }
+.mrg-gap-below.mrg-conflict { box-shadow: inset 0 -2px 0 var(--mrg-conflict-edge); }
+.mrg-gap-below.mrg-mod { box-shadow: inset 0 -2px 0 var(--mrg-mod-edge); }
+.mrg-gap-below.mrg-add { box-shadow: inset 0 -2px 0 var(--mrg-add-edge); }
+.mrg-gap-below.mrg-del { box-shadow: inset 0 -2px 0 var(--mrg-del-edge); }
+.mrg-conflict .mrg-word { background: var(--mrg-conflict-word); }
+.mrg-mod .mrg-word { background: var(--mrg-mod-word); }
+.mrg-add .mrg-word { background: var(--mrg-add-word); }
+.mrg-del .mrg-word { background: var(--mrg-del-word); }
+
+.mrg-host .tok-keyword,
+.mrg-host .tok-bool,
+.mrg-host .tok-atom { color: var(--tok-keyword); }
+.mrg-host .tok-string,
+.mrg-host .tok-string2,
+.mrg-host .tok-inserted { color: var(--tok-string); }
+.mrg-host .tok-number,
+.mrg-host .tok-literal { color: var(--tok-number); }
+.mrg-host .tok-comment { color: var(--tok-comment); font-style: italic; }
+.mrg-host .tok-typeName,
+.mrg-host .tok-className,
+.mrg-host .tok-namespace { color: var(--tok-type); }
+.mrg-host .tok-propertyName { color: var(--tok-property); }
+.mrg-host .tok-meta,
+.mrg-host .tok-macroName,
+.mrg-host .tok-annotation { color: var(--tok-meta); }
+.mrg-host .tok-variableName.tok-definition,
+.mrg-host .tok-propertyName.tok-definition { color: var(--tok-func); }
+.mrg-host .tok-invalid,
+.mrg-host .tok-deleted { color: var(--danger); }
+
+.mrg-stripe {
+  flex: none;
+  position: relative;
+  width: 8px;
+  background: var(--bg-deep);
+}
+
+.mrg-col:first-child .mrg-stripe {
+  border-right: 1px solid var(--border-soft);
+}
+
+.mrg-col:not(:first-child) .mrg-stripe {
+  border-left: 1px solid var(--border-soft);
+}
+
+.mrg-stripe i {
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  min-height: 3px;
+  cursor: pointer;
+}
+
+.mrg-stripe i.mrg-conflict { background: var(--mrg-conflict-edge); }
+.mrg-stripe i.mrg-mod { background: var(--mrg-mod-edge); }
+.mrg-stripe i.mrg-add { background: var(--mrg-add-edge); }
+.mrg-stripe i.mrg-del { background: var(--mrg-del-edge); }
+
+.mrg-divider-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-hover);
+}
+
+.mrg-divider-body svg {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+}
+
+.mrg-band {
+  stroke-width: 1;
+}
+
+.mrg-band.mrg-conflict { fill: var(--mrg-conflict); stroke: var(--mrg-conflict-edge); }
+.mrg-band.mrg-mod { fill: var(--mrg-mod); stroke: var(--mrg-mod-edge); }
+.mrg-band.mrg-add { fill: var(--mrg-add); stroke: var(--mrg-add-edge); }
+.mrg-band.mrg-del { fill: var(--mrg-del); stroke: var(--mrg-del-edge); }
+
+.mrg-actions {
+  position: absolute;
+  display: flex;
+  margin-top: 1px;
+}
+
+.mrg-actions.left {
+  left: 0;
+}
+
+.mrg-actions.right {
+  right: 0;
+}
+
+.mrg-act {
+  width: 14px;
+  height: 16px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text-muted);
+}
+
+.mrg-act.ignore {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+
+.mrg-act:hover:not(:disabled) {
+  background: var(--bg-selected);
+  color: var(--text);
+}
+
+.mrg-act.ignore:hover:not(:disabled) {
+  color: var(--danger);
+}
+
+.mrg-foot {
+  flex: none;
+  height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border-top: 1px solid var(--border);
+}
+
+.mrg-help {
   width: 22px;
   height: 22px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  border: 1px solid var(--border-soft);
+  border-radius: 50%;
   color: var(--text-muted);
-  border-radius: 3px;
+  cursor: help;
 }
 
-.findbar button:hover {
-  background: var(--bg-hover);
+.mrg-btn {
+  height: 26px;
+  padding: 0 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: var(--bg-input);
   color: var(--text);
-}
-
-.findbar em {
-  color: var(--danger);
-  font-style: normal;
-  font-size: 11px;
-}
-
-/* ── Pane Body ──────────────────────────────────────── */
-.pane-body {
-  flex: 1;
-  min-height: 0;
-  overflow: scroll;
-  scrollbar-gutter: stable both-edges;
-  background: var(--bg-deep);
-  font-family: Consolas, "Courier New", monospace;
-  font-size: 12px;
-  line-height: 18px;
-}
-
-.pane-body::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-
-.pane-body::-webkit-scrollbar-thumb {
-  background: var(--scrollbar);
-  border-radius: 8px;
-}
-
-.pane-body::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.result-pane-body {
-  padding: 0;
-}
-
-/* ── Code Lines ─────────────────────────────────────── */
-.line {
-  display: flex;
-  min-height: 18px;
-  height: 18px;
-}
-
-.line.current {
-  box-shadow: inset 3px 0 0 var(--accent);
-}
-
-.line.conflict-border {
-  box-shadow: inset 3px 0 0 #c754c7, inset -3px 0 0 #c754c7;
-  background: var(--diff-conflict-bg) !important;
-}
-
-.no {
-  flex: none;
-  width: 40px;
-  padding: 0 6px 0 4px;
-  color: var(--text-dim);
-  text-align: right;
-  user-select: none;
-}
-
-.blame {
-  flex: none;
-  width: 120px;
-  padding-right: 8px;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text-dim);
-  font-size: 11px;
-  user-select: none;
 }
 
-.code {
-  flex: 1;
-  min-width: 0;
-  padding-right: 8px;
-  white-space: pre;
-  color: var(--text-editor);
-}
-
-/* ── Diff Backgrounds ───────────────────────────────── */
-.line.changed { background: var(--diff-changed); }
-.line.added { background: var(--diff-added-bg); }
-.line.deleted { background: var(--diff-deleted-bg); }
-.line.conflict { background: var(--diff-conflict-bg); }
-.line.discarded { opacity: 0.35; background: transparent; }
-
-/* ── Word Diff ──────────────────────────────────────── */
-:deep(.wd) {
-  background: rgba(255, 200, 50, 0.35);
-  border-radius: 2px;
-  padding: 0 1px;
-}
-
-/* ── Fold Bar ───────────────────────────────────────── */
-.fold-bar {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  box-sizing: border-box;
-  min-height: 18px;
-  height: 18px;
-  background: var(--bg-hover);
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-  color: var(--text-muted);
-  font-size: 11px;
-  cursor: pointer;
-  user-select: none;
-}
-
-.fold-bar:hover {
+.mrg-btn:hover:not(:disabled) {
   background: var(--bg-selected);
-  color: var(--text);
 }
 
-.fold-icon {
-  font-size: 14px;
-  line-height: 1;
-  color: var(--text-dim);
-}
-
-.fold-text {
-  white-space: nowrap;
-}
-
-.fold-gutter {
-  min-height: 18px;
-  height: 18px;
-}
-
-/* ── Gutter ─────────────────────────────────────────── */
-.gutter-head {
-  flex: none;
-  height: 30px;
-  background: var(--bg-hover);
-}
-
-.gutter-body {
-  flex: 1;
-  min-height: 0;
-  overflow: hidden auto;
-  scrollbar-width: none;
-  background: var(--bg-deep);
-  border-left: 1px solid var(--border);
-  border-right: 1px solid var(--border);
-}
-
-.gutter-body::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-}
-
-.gutter-row {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 2px;
-  min-height: 18px;
-  height: 18px;
-}
-
-.gutter-row.hunk-start {
-  position: relative;
-}
-
-.accept-btn,
-.reject-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 3px;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-
-.accept-btn {
-  width: 18px;
-  height: 18px;
-  color: var(--accent);
-}
-
-.accept-btn:hover {
+.mrg-btn.primary {
+  border-color: var(--accent);
   background: var(--accent);
   color: #fff;
 }
 
-.reject-btn {
-  width: 16px;
-  height: 16px;
-  color: var(--text-dim);
+.mrg-btn.primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+  background: var(--accent);
 }
 
-.reject-btn:hover {
-  background: var(--danger);
-  color: #fff;
-}
-
-/* ── Result Editor ──────────────────────────────────── */
-.result-wrap {
-  display: flex;
-  min-height: 100%;
-}
-
-.result-lines-col {
-  flex: none;
-  width: 40px;
-  padding: 0 4px 0 0;
-  text-align: right;
-  color: var(--text-dim);
-  font-family: Consolas, "Courier New", monospace;
-  font-size: 12px;
-  line-height: 18px;
-  user-select: none;
-}
-
-.result-no {
-  height: 18px;
-  min-height: 18px;
-}
-
-.result-editor {
-  display: block;
-  flex: 1;
-  box-sizing: border-box;
-  min-width: 0;
-  min-height: 100%;
-  margin: 0;
-  padding: 0 8px 0 0;
-  border: 0;
-  outline: none;
-  resize: none;
-  overflow: hidden;
-  color: var(--text-editor);
-  background: transparent;
-  font-family: Consolas, "Courier New", monospace;
-  font-size: 12px;
-  line-height: 18px;
-  white-space: pre;
-  tab-size: 4;
-}
-
-/* ── Footer ─────────────────────────────────────────── */
-.spacer { flex: 1; }
-
-.apply-current {
-  gap: 4px;
-}
-
-/* ── Complete Dialog ────────────────────────────────── */
-.complete-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 1400;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, 0.45);
-}
-
-.complete-box {
-  width: min(420px, calc(100vw - 48px));
-  padding: 24px 28px;
-  border-radius: 8px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-elevated);
-  box-shadow: var(--shadow);
-  text-align: center;
-}
-
-.complete-icon {
-  font-size: 36px;
-  color: var(--ok);
-  margin-bottom: 8px;
-}
-
-.complete-box h3 {
-  margin: 0 0 8px;
-  font-size: 16px;
-}
-
-.complete-box p {
-  margin: 0 0 20px;
-  color: var(--text-muted);
-}
-
-/* ── Utility ────────────────────────────────────────── */
-.err {
-  padding: 16px;
-  color: var(--danger);
+.mrg-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 </style>

@@ -1222,7 +1222,6 @@ onUnmounted(() => {
         :busy="busy"
         @back="mergeEditPath = ''"
         @save="handleSaveResolved"
-        @abort="handleAbortMerge"
       />
       <Modal v-if="showRemoteDialog" title="管理远程仓库" medium @close="showRemoteDialog = false">
         <div class="list-rows">
