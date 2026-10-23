@@ -9,7 +9,7 @@ import {
   syncPull,
   syncPush,
 } from "../api";
-import type { ProjectTab } from "../types";
+import type { ProjectTab, SyncOutcome } from "../types";
 import Icons from "./Icons.vue";
 
 type Operation = "fetch" | "pull" | "commit" | "push";
@@ -109,6 +109,18 @@ async function refreshAll() {
   loading.value = false;
 }
 
+function applySync(row: BatchRow, outcome: SyncOutcome, fallback: string) {
+  if (outcome.status === "conflicts") {
+    row.state = "warning";
+    row.conflicts = outcome.conflicts;
+    appendStream(row, outcome.message);
+    for (const path of outcome.conflicts.slice(0, 20)) appendStream(row, `冲突：${path}`);
+  } else {
+    row.state = "success";
+    appendStream(row, outcome.message.trim() || fallback);
+  }
+}
+
 async function runRow(row: BatchRow, operation: Operation) {
   row.state = "running";
   row.stream = [];
@@ -123,15 +135,7 @@ async function runRow(row: BatchRow, operation: Operation) {
       appendStream(row, message.trim() || "获取完成");
     } else if (operation === "pull" || operation === "push") {
       const outcome = operation === "pull" ? await syncPull(row.path) : await syncPush(row.path);
-      if (outcome.status === "conflicts") {
-        row.state = "warning";
-        row.conflicts = outcome.conflicts;
-        appendStream(row, outcome.message);
-        for (const path of outcome.conflicts.slice(0, 20)) appendStream(row, `冲突：${path}`);
-      } else {
-        row.state = "success";
-        appendStream(row, outcome.message.trim() || (operation === "pull" ? "拉取完成" : "推送完成"));
-      }
+      applySync(row, outcome, operation === "pull" ? "拉取完成" : "推送完成");
     } else if (operation === "commit") {
       const status = await getStatus(row.path);
       const files = [
@@ -139,18 +143,18 @@ async function runRow(row: BatchRow, operation: Operation) {
         ...status.unversioned.map((file) => ({ path: file.path, untracked: true })),
       ];
       if (!files.length) {
-        row.state = "success";
-        appendStream(row, "没有可提交的变更");
-      } else {
-        appendStream(row, `发现 ${files.length} 个文件，正在整理差异…`);
-        appendStream(row, "正在等待 AI 生成提交信息…");
-        const generated = await generateCommitMessage(row.path, files);
-        appendStream(row, `AI（${generated.model || "默认模型"}）已生成提交信息：\n${generated.message}`);
-        appendStream(row, "正在写入 Git 提交…");
-        await commitChanges(row.path, generated.message, false, files.map((file) => file.path));
-        row.state = "success";
-        appendStream(row, `提交完成，共 ${files.length} 个文件`);
+        row.state = "idle";
+        appendStream(row, "没有变更，已跳过");
+        return;
       }
+      appendStream(row, `发现 ${files.length} 个文件，正在整理差异…`);
+      appendStream(row, "正在等待 AI 生成提交信息…");
+      const generated = await generateCommitMessage(row.path, files);
+      appendStream(row, `AI（${generated.model || "默认模型"}）已生成提交信息：\n${generated.message}`);
+      appendStream(row, "正在写入 Git 提交…");
+      await commitChanges(row.path, generated.message, false, files.map((file) => file.path));
+      appendStream(row, `提交完成，共 ${files.length} 个文件，正在推送到远程分支…`);
+      applySync(row, await syncPush(row.path), "推送完成");
     }
     appendStream(row, "正在刷新仓库状态…");
     await refreshRow(row, true);
@@ -202,7 +206,7 @@ onMounted(() => void refreshAll());
       </button>
       <span class="divider" />
       <button type="button" class="primary-btn" :disabled="running || loading || !selectedCount" @click="run('commit')">
-        <Icons name="sparkle" /> AI 生成并提交
+        <Icons name="sparkle" /> AI 提交并推送
       </button>
       <button type="button" class="icon-btn refresh" title="重新检查" :disabled="running || loading" @click="refreshAll">
         <span v-if="loading" class="btn-spinner" />
