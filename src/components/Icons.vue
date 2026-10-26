@@ -29,6 +29,7 @@ defineProps<{ name: string; size?: number }>();
     <path v-if="name === 'pull'" d="M8 2v8M5 7l3 3 3-3M3 13h10M12 4l2 0" />
     <path v-if="name === 'push'" d="M8 13V5M5 8l3-3 3 3M3 3h10" />
     <path v-if="name === 'close'" d="M4 4l8 8M12 4l-8 8" />
+    <path v-if="name === 'trash'" d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.8 6.5v4.5M9.2 6.5v4.5" />
     <path v-if="name === 'plus'" d="M8 3v10M3 8h10" />
     <path v-if="name === 'folder'" d="M2 4h5l1 2h6v7H2z" />
     <path v-if="name === 'file'" d="M5 2h5l4 4v8H5zM10 2v4h4" />

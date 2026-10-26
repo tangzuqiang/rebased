@@ -80,6 +80,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   open: [];
   openPath: [path: string];
+  removeRecent: [path: string];
   settings: [];
   failed: [path: string];
   meta: [payload: { path: string; name: string; branch: string; dirty: boolean; merging: boolean }];
@@ -1044,6 +1045,7 @@ onUnmounted(() => {
         @terminal="toggleTerminal"
         @open="emit('open')"
         @open-path="emit('openPath', $event)"
+        @remove-recent="emit('removeRecent', $event)"
         @fetch="handleFetch"
         @pull="handlePull"
         @commit="openCommit()"

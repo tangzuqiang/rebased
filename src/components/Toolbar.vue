@@ -22,6 +22,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   open: [];
   openPath: [path: string];
+  removeRecent: [path: string];
   fetch: [];
   pull: [];
   commit: [];
@@ -107,15 +108,24 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branc
         <template v-if="otherRecent.length">
           <div class="divider" />
           <div class="item dim">最近项目</div>
-          <button
-            v-for="item in otherRecent"
-            :key="item.path"
-            type="button"
-            :title="item.path"
-            @click="repoOpen = false; emit('openPath', item.path)"
-          >
-            {{ item.name }}
-          </button>
+          <div v-for="item in otherRecent" :key="item.path" class="recent-row">
+            <button
+              type="button"
+              class="recent-name"
+              :title="`${item.name}\n${item.path}`"
+              @click="repoOpen = false; emit('openPath', item.path)"
+            >
+              {{ item.name }}
+            </button>
+            <button
+              type="button"
+              class="recent-remove"
+              title="从最近项目中移除"
+              @click.stop="emit('removeRecent', item.path)"
+            >
+              <Icons name="trash" :size="13" />
+            </button>
+          </div>
         </template>
       </PopupMenu>
 
@@ -257,5 +267,38 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branc
 
 .current {
   color: var(--link);
+}
+
+.recent-row {
+  display: flex;
+  align-items: center;
+}
+
+.recent-row:hover {
+  background: var(--bg-selected);
+}
+
+.popup-menu .recent-row .recent-name {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  background: transparent;
+}
+
+.popup-menu .recent-row .recent-remove {
+  flex: none;
+  width: 28px;
+  min-height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  background: transparent;
+}
+
+.popup-menu .recent-row .recent-remove:hover {
+  color: var(--danger);
+  background: transparent;
 }
 </style>

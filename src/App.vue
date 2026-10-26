@@ -225,6 +225,7 @@ onMounted(async () => {
       :recent="recent"
       @open="handleOpen"
       @open-path="handleOpenPath"
+      @remove-recent="handleRemoveRecent"
       @settings="showSettings = true"
       @failed="closeTab"
       @meta="updateMeta"
