@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import { formatDateTime } from "../path";
 import type { GitCommit, GitFile } from "../types";
 import Icons from "./Icons.vue";
@@ -9,6 +9,19 @@ const props = defineProps<{
   message?: string;
   commit?: GitCommit | null;
 }>();
+
+const emit = defineEmits<{
+  open: [path: string];
+}>();
+
+const picked = ref("");
+
+watch(
+  () => props.commit?.hash,
+  () => {
+    picked.value = "";
+  },
+);
 
 const grouped = computed(() => {
   const tree = new Map<string, GitFile[]>();
@@ -34,7 +47,14 @@ function fileName(path: string) {
     <div class="head">
       <span>{{ files.length }} 个文件</span>
       <span class="spacer" />
-      <button class="icon-btn" title="更多"><Icons name="more" /></button>
+      <button
+        class="icon-btn"
+        title="显示差异"
+        :disabled="!files.length || !commit"
+        @click="emit('open', picked || files[0]?.path || '')"
+      >
+        <Icons name="apply-both" />
+      </button>
     </div>
     <div class="scroll">
       <div v-if="!files.length" class="empty-hint">选择一条提交查看文件</div>
@@ -44,7 +64,14 @@ function fileName(path: string) {
           <span>{{ dir }}</span>
           <span class="muted">{{ items.length }} 个文件</span>
         </div>
-        <div v-for="file in items" :key="file.path" class="file">
+        <div
+          v-for="file in items"
+          :key="file.path"
+          class="file"
+          :class="{ picked: picked === file.path }"
+          :title="`${file.path}\n点击查看修改内容`"
+          @click="picked = file.path; commit && emit('open', file.path)"
+        >
           <span class="file-status" :class="file.status">{{ file.status }}</span>
           <Icons name="file" :size="12" />
           <span class="name">{{ fileName(file.path) }}</span>
@@ -143,6 +170,13 @@ function fileName(path: string) {
 
 .file {
   padding-left: 22px;
+  cursor: default;
+  user-select: none;
+}
+
+.file:hover,
+.file.picked {
+  background: var(--bg-selected);
 }
 
 .name {

@@ -50,6 +50,7 @@ const props = defineProps<{
   toLabel: string;
   /** 把 to 放在左侧、from 放在右侧显示。 */
   reverse?: boolean;
+  initialPath?: string;
 }>();
 
 const emit = defineEmits<{
@@ -307,7 +308,11 @@ async function loadFiles() {
   active.value = null;
   try {
     files.value = await revDiffFiles(props.repoPath, props.from, props.to);
-    active.value = files.value[0] ?? null;
+    const wanted = props.initialPath;
+    active.value =
+      (wanted && files.value.find((file) => file.path === wanted || file.path.split(" → ").includes(wanted))) ||
+      files.value[0] ||
+      null;
   } catch (error) {
     listError.value = error instanceof Error ? error.message : String(error);
   } finally {

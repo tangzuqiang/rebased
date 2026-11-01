@@ -48,7 +48,7 @@ function onPointerMove(event: PointerEvent) {
   let insert = items.length;
   for (let i = 0; i < items.length; i += 1) {
     const rect = items[i].getBoundingClientRect();
-    if (event.clientX < rect.left + rect.width / 2) {
+    if (event.clientY < rect.top || (event.clientY < rect.bottom && event.clientX < rect.left + rect.width / 2)) {
       insert = i;
       break;
     }
@@ -123,22 +123,26 @@ onUnmounted(onPointerUp);
 
 <style scoped>
 .tabs {
-  height: 32px;
+  min-height: 32px;
+  max-height: 30vh;
   flex: none;
   display: flex;
-  align-items: stretch;
+  align-items: flex-start;
   background: var(--bg-tabbar);
   border-bottom: 1px solid var(--border);
 }
 
 .list {
   display: flex;
+  flex-wrap: wrap;
   min-width: 0;
   flex: 1;
-  overflow-x: auto;
+  max-height: 30vh;
+  overflow-y: auto;
 }
 
 .batch {
+  height: 26px;
   margin: 3px 4px;
   flex: none;
   border-right: 1px solid var(--border-soft);
@@ -147,7 +151,7 @@ onUnmounted(onPointerUp);
 }
 
 .list::-webkit-scrollbar {
-  height: 0;
+  width: 6px;
 }
 
 .list.dragging,
@@ -161,10 +165,11 @@ onUnmounted(onPointerUp);
   align-items: center;
   gap: 6px;
   max-width: 220px;
-  height: 100%;
+  height: 32px;
   padding: 0 6px 0 12px;
   color: var(--text-muted);
   border-right: 1px solid var(--border);
+  box-shadow: inset 0 -1px 0 var(--border-soft);
   user-select: none;
   touch-action: none;
 }
@@ -245,6 +250,7 @@ onUnmounted(onPointerUp);
 }
 
 .add {
+  height: 26px;
   margin: 3px 6px;
 }
 </style>

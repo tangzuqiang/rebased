@@ -147,17 +147,6 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branc
       </button>
       <PopupMenu :open="branchOpen" :anchor="branchAnchor" @close="branchOpen = false">
         <div class="item dim">Git 操作</div>
-        <button type="button" :disabled="busy" @click="run('commit')">提交…</button>
-        <button type="button" :disabled="busy" @click="run('push')">推送…</button>
-        <button type="button" :disabled="busy" @click="run('pull')">
-          <span v-if="busy && busyText?.includes('拉取')" class="btn-spinner" />
-          拉取
-        </button>
-        <button type="button" :disabled="busy" @click="run('fetch')">
-          <span v-if="busy && busyText?.includes('获取')" class="btn-spinner" />
-          获取
-        </button>
-        <button type="button" :disabled="busy" @click="run('merge')">合并…</button>
         <button type="button" :disabled="busy || !dirty" @click="run('rollback')">回滚…</button>
         <button type="button" :disabled="busy" @click="run('new-branch')">新建分支…</button>
         <button v-if="merging" type="button" @click="branchOpen = false; emit('conflicts')">解决冲突…</button>
@@ -174,6 +163,31 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branc
           @action="branchOpen = false; emit('branchAction', $event)"
         />
       </PopupMenu>
+
+      <div v-if="repo.isGit" class="git-actions">
+        <button type="button" class="action" :disabled="busy" title="提交" @click="run('commit')">
+          <Icons name="check" :size="13" />
+          <span>提交</span>
+        </button>
+        <button type="button" class="action" :disabled="busy" title="推送" @click="run('push')">
+          <Icons name="push" :size="13" />
+          <span>推送</span>
+        </button>
+        <button type="button" class="action" :disabled="busy" title="拉取" @click="run('pull')">
+          <span v-if="busy && busyText?.includes('拉取')" class="btn-spinner" />
+          <Icons v-else name="pull" :size="13" />
+          <span>拉取</span>
+        </button>
+        <button type="button" class="action" :disabled="busy" title="获取" @click="run('fetch')">
+          <span v-if="busy && busyText?.includes('获取')" class="btn-spinner" />
+          <Icons v-else name="fetch" :size="13" />
+          <span>获取</span>
+        </button>
+        <button type="button" class="action" :disabled="busy" title="合并" @click="run('merge')">
+          <Icons name="branch" :size="13" />
+          <span>合并</span>
+        </button>
+      </div>
 
       <button
         v-if="repo.isGit && merging"
@@ -267,6 +281,33 @@ function run(action: "commit" | "push" | "merge" | "fetch" | "pull" | "new-branc
 
 .current {
   color: var(--link);
+}
+
+.git-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 4px;
+}
+
+.action {
+  height: 24px;
+  padding: 0 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 4px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.action:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.action:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .recent-row {

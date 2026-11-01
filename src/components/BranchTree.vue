@@ -12,11 +12,14 @@ const emit = defineEmits<{
   change: [refs: string[]];
 }>();
 
-const openLocal = ref(false);
-const openRemote = ref(false);
-const openTags = ref(false);
-const selected = ref<string[]>(["HEAD"]);
+type Group = "local" | "remote" | "tag";
+
+const open = ref<Record<Group, boolean>>({ local: false, remote: false, tag: false });
+const active = ref<string[]>(["HEAD"]);
+const highlighted = ref("HEAD");
+const anchor = ref("HEAD");
 const query = ref("");
+const searching = computed(() => query.value.trim().length > 0);
 
 function matchName(name: string) {
   const keyword = query.value.trim().toLowerCase();
@@ -35,56 +38,79 @@ const tags = computed(() =>
   props.branches.filter((item) => item.kind === "tag" && matchName(item.name)),
 );
 
-function isOn(name: string) {
-  return selected.value.includes(name);
+const groups = computed(() =>
+  [
+    { key: "local" as Group, label: "本地", items: localBranches.value },
+    { key: "remote" as Group, label: "远程", items: remoteBranches.value },
+    { key: "tag" as Group, label: "标签", items: tags.value },
+  ].filter((group) => !searching.value || group.items.length > 0),
+);
+
+const visibleNames = computed(() => [
+  ...(searching.value ? [] : ["HEAD"]),
+  ...groups.value.flatMap((group) => (isOpen(group.key) ? group.items.map((item) => item.name) : [])),
+]);
+
+function isOpen(group: Group) {
+  return searching.value || open.value[group];
 }
 
-function emitRefs() {
-  const names = selected.value.filter((name) => name !== "HEAD");
-  if (!names.length || (selected.value.length === 1 && selected.value[0] === "HEAD")) {
-    emit("change", props.currentBranch ? [props.currentBranch] : []);
-    return;
-  }
-  emit("change", names);
+function toggleGroup(group: Group) {
+  if (searching.value) return;
+  open.value[group] = !open.value[group];
 }
 
-function toggle(name: string) {
-  if (name === "HEAD") {
-    selected.value = ["HEAD"];
-    emitRefs();
-    return;
-  }
-  selected.value = selected.value.filter((item) => item !== "HEAD");
-  if (isOn(name)) {
-    selected.value = selected.value.filter((item) => item !== name);
-  } else {
-    selected.value = [...selected.value, name];
-  }
-  if (!selected.value.length) {
-    selected.value = ["HEAD"];
-  }
-  emitRefs();
+function setActive(names: string[]) {
+  active.value = names.length ? names : ["HEAD"];
+  const refs = active.value.map((name) => (name === "HEAD" ? props.currentBranch : name)).filter(Boolean);
+  emit("change", [...new Set(refs)]);
 }
 
-function toggleGroup(kind: "local" | "remote" | "tag") {
-  const list =
-    kind === "local" ? localBranches.value : kind === "remote" ? remoteBranches.value : tags.value;
-  const names = list.map((item) => item.name);
-  const allOn = names.length > 0 && names.every((name) => isOn(name));
-  selected.value = selected.value.filter((item) => item !== "HEAD" && !names.includes(item));
-  if (!allOn) {
-    selected.value = [...selected.value, ...names];
-  }
-  if (!selected.value.length) {
-    selected.value = ["HEAD"];
-  }
-  emitRefs();
+function show(name: string) {
+  highlighted.value = name;
+  anchor.value = name;
+  setActive([name]);
 }
 
-function groupChecked(kind: "local" | "remote" | "tag") {
-  const list =
-    kind === "local" ? localBranches.value : kind === "remote" ? remoteBranches.value : tags.value;
-  return list.length > 0 && list.every((item) => isOn(item.name));
+function onRowClick(event: MouseEvent, name: string) {
+  highlighted.value = name;
+  if (event.shiftKey) {
+    const names = visibleNames.value;
+    const from = names.indexOf(anchor.value);
+    const to = names.indexOf(name);
+    if (from >= 0 && to >= 0) {
+      const range = names.slice(Math.min(from, to), Math.max(from, to) + 1);
+      const keep = event.ctrlKey || event.metaKey ? active.value : [];
+      setActive([...new Set([...keep, ...range])]);
+      return;
+    }
+  }
+  anchor.value = name;
+  if (event.ctrlKey || event.metaKey) {
+    setActive(active.value.includes(name) ? active.value.filter((item) => item !== name) : [...active.value, name]);
+  }
+}
+
+function onRowDblClick(event: MouseEvent, name: string) {
+  if (event.ctrlKey || event.metaKey || event.shiftKey) return;
+  show(name);
+}
+
+function onSearchKey(event: KeyboardEvent) {
+  const names = visibleNames.value;
+  if (event.key === "Enter") {
+    const target = names.includes(highlighted.value) ? highlighted.value : names[0];
+    if (target) show(target);
+  } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    if (!names.length) return;
+    const index = names.indexOf(highlighted.value);
+    const next = event.key === "ArrowDown" ? Math.min(names.length - 1, index + 1) : Math.max(0, index - 1);
+    highlighted.value = names[index < 0 ? 0 : next];
+  } else if (event.key === "Escape" && query.value) {
+    event.stopPropagation();
+    query.value = "";
+  }
 }
 </script>
 
@@ -92,76 +118,49 @@ function groupChecked(kind: "local" | "remote" | "tag") {
   <aside class="tree">
     <div class="search">
       <Icons name="search" :size="12" />
-      <input v-model="query" placeholder="过滤分支" />
+      <input v-model="query" placeholder="过滤分支，回车查看" @keydown="onSearchKey" />
+      <button v-if="query" type="button" class="clear" title="清空" @click="query = ''">
+        <Icons name="close" :size="10" />
+      </button>
     </div>
     <div class="scroll">
-      <button type="button" class="row head-row" :class="{ on: isOn('HEAD') }" @click="toggle('HEAD')">
-        <input type="checkbox" :checked="isOn('HEAD')" @click.stop="toggle('HEAD')" />
-        <span>HEAD (当前分支)</span>
+      <button
+        v-if="!searching"
+        type="button"
+        class="row head-row"
+        :class="{ on: highlighted === 'HEAD', active: active.includes('HEAD') }"
+        title="双击查看当前分支的提交，Ctrl / Shift 点击可多选"
+        @click="onRowClick($event, 'HEAD')"
+        @dblclick="onRowDblClick($event, 'HEAD')"
+      >
+        <span>HEAD（当前分支）</span>
       </button>
-      <div class="group">
-        <button type="button" class="row group-row" @click="openLocal = !openLocal">
-          <Icons name="chevron" :size="10" :class="{ folded: !openLocal }" />
-          <input type="checkbox" :checked="groupChecked('local')" @click.stop="toggleGroup('local')" />
-          <span>本地</span>
+      <div v-for="group in groups" :key="group.key" class="group">
+        <button type="button" class="row group-row" @click="toggleGroup(group.key)">
+          <Icons name="chevron" :size="10" :class="{ folded: !isOpen(group.key) }" />
+          <span>{{ group.label }}</span>
+          <em>{{ group.items.length }}</em>
         </button>
-        <template v-if="openLocal">
+        <template v-if="isOpen(group.key)">
           <button
-            v-for="item in localBranches"
+            v-for="item in group.items"
             :key="item.name"
             type="button"
             class="row item"
-            :class="{ on: isOn(item.name), current: item.current }"
-            :title="item.name"
-            @click="toggle(item.name)"
+            :class="{ on: highlighted === item.name, active: active.includes(item.name), current: item.current }"
+            :title="`${item.name}\n双击查看该分支的提交，Ctrl / Shift 点击可多选`"
+            @click="onRowClick($event, item.name)"
+            @dblclick="onRowDblClick($event, item.name)"
           >
-            <input type="checkbox" :checked="isOn(item.name)" @click.stop="toggle(item.name)" />
             <span>{{ item.name }}</span>
           </button>
         </template>
       </div>
-      <div class="group">
-        <button type="button" class="row group-row" @click="openRemote = !openRemote">
-          <Icons name="chevron" :size="10" :class="{ folded: !openRemote }" />
-          <input type="checkbox" :checked="groupChecked('remote')" @click.stop="toggleGroup('remote')" />
-          <span>远程</span>
-        </button>
-        <template v-if="openRemote">
-          <button
-            v-for="item in remoteBranches"
-            :key="item.name"
-            type="button"
-            class="row item"
-            :class="{ on: isOn(item.name) }"
-            :title="item.name"
-            @click="toggle(item.name)"
-          >
-            <input type="checkbox" :checked="isOn(item.name)" @click.stop="toggle(item.name)" />
-            <span>{{ item.name }}</span>
-          </button>
-        </template>
-      </div>
-      <div class="group">
-        <button type="button" class="row group-row" @click="openTags = !openTags">
-          <Icons name="chevron" :size="10" :class="{ folded: !openTags }" />
-          <input type="checkbox" :checked="groupChecked('tag')" @click.stop="toggleGroup('tag')" />
-          <span>标签</span>
-        </button>
-        <template v-if="openTags">
-          <button
-            v-for="item in tags"
-            :key="item.name"
-            type="button"
-            class="row item"
-            :class="{ on: isOn(item.name) }"
-            :title="item.name"
-            @click="toggle(item.name)"
-          >
-            <input type="checkbox" :checked="isOn(item.name)" @click.stop="toggle(item.name)" />
-            <span>{{ item.name }}</span>
-          </button>
-        </template>
-      </div>
+      <p v-if="searching && !groups.length" class="empty">没有匹配的分支</p>
+    </div>
+    <div v-if="active.length > 1" class="multi">
+      <span>已选 {{ active.length }} 个分支</span>
+      <button type="button" @click="show('HEAD')">只看当前分支</button>
     </div>
   </aside>
 </template>
@@ -190,10 +189,63 @@ function groupChecked(kind: "local" | "remote" | "tag") {
 }
 
 .search input {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   background: transparent;
   border: 0;
   outline: none;
+}
+
+.clear {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  color: var(--text-dim);
+}
+
+.clear:hover {
+  color: var(--text);
+}
+
+.group-row em {
+  margin-left: auto;
+  font-style: normal;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.row.active {
+  box-shadow: inset 2px 0 0 var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.multi {
+  flex: none;
+  height: 28px;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.multi button {
+  color: var(--link);
+  font-size: 11px;
+}
+
+.empty {
+  margin: 0;
+  padding: 12px;
+  color: var(--text-dim);
+  text-align: center;
 }
 
 .scroll {
@@ -210,6 +262,7 @@ function groupChecked(kind: "local" | "remote" | "tag") {
   gap: 6px;
   text-align: left;
   color: var(--text);
+  user-select: none;
 }
 
 .row:hover,
@@ -239,9 +292,5 @@ function groupChecked(kind: "local" | "remote" | "tag") {
 
 .folded {
   transform: rotate(-90deg);
-}
-
-input[type="checkbox"] {
-  accent-color: var(--accent);
 }
 </style>

@@ -119,6 +119,16 @@ const pushBranch = ref("");
 const branchDialog = ref<"" | "new" | "rename" | "diff" | "pick-compare">("");
 const actionBranch = ref<BranchInfo | null>(null);
 const branchCompare = ref<{ from: string; to: string } | null>(null);
+const commitDiff = ref<{ commit: GitCommit; path: string } | null>(null);
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+const detailCommit = ref<GitCommit | null>(null);
+
+function openCommitDiff(path = "", hash = detailCommit.value?.hash ?? selectedHash.value) {
+  const commit =
+    commits.value.find((item) => item.hash === hash) ?? (detailCommit.value?.hash === hash ? detailCommit.value : null);
+  if (commit) commitDiff.value = { commit, path };
+}
 const actionName = ref("");
 const checkoutNewBranch = ref(true);
 const branchError = ref("");
@@ -453,6 +463,14 @@ async function handleSelect(hash: string) {
   await loadCommitDetails(hash);
 }
 
+watch(selectedCommit, (commit) => {
+  if (commit) detailCommit.value = commit;
+});
+
+watch(selectedHash, (hash) => {
+  if (!hash) detailCommit.value = null;
+});
+
 async function handleDiscard(paths: { path: string; untracked: boolean }[]) {
   const message = await withBusy(
     "正在回滚…",
@@ -467,6 +485,22 @@ async function handleDiscard(paths: { path: string; untracked: boolean }[]) {
     notify(message);
     showRollback.value = false;
   }
+}
+
+async function handleDeleteUntracked(paths: string[]) {
+  const done = await withBusy(
+    "正在删除未跟踪文件…",
+    async () => {
+      await discardWorktreeChanges(
+        repoPath.value,
+        paths.map((path) => ({ path, untracked: true })),
+      );
+      await refreshStatus();
+      return true;
+    },
+    { errorPopup: true, errorTitle: "删除失败" },
+  );
+  if (done) notify(`已删除 ${paths.length} 个未跟踪文件`);
 }
 
 async function handleCommit(payload: {
@@ -1084,8 +1118,9 @@ onUnmounted(() => {
           @changed="handleLogChanged"
           @amend="openAmend"
           @checkout="handleCheckout"
+          @show-changes="openCommitDiff('', $event)"
         />
-        <FilesPanel :files="commitFiles" :message="commitMessage" :commit="selectedCommit" />
+        <FilesPanel :files="commitFiles" :message="commitMessage" :commit="detailCommit" @open="openCommitDiff($event)" />
       </main>
       <TerminalPanel
         v-if="terminalReady"
@@ -1118,6 +1153,7 @@ onUnmounted(() => {
         :start-amend="startAmend"
         @close="showCommit = false; startAmend = false"
         @commit="handleCommit"
+        @delete-untracked="handleDeleteUntracked"
       />
       <RollbackDialog
         v-if="active && showRollback && repo"
@@ -1194,6 +1230,17 @@ onUnmounted(() => {
         :from-label="branchCompare.from"
         :to-label="branchCompare.to"
         @close="branchCompare = null"
+      />
+      <RevDiffDialog
+        v-if="commitDiff"
+        :repo-path="repoPath"
+        :title="`提交 ${commitDiff.commit.shortHash} 的修改 - ${commitDiff.commit.message}`"
+        :from="commitDiff.commit.parents[0] || EMPTY_TREE"
+        :to="commitDiff.commit.hash"
+        :from-label="commitDiff.commit.parents[0] ? `父提交 ${commitDiff.commit.parents[0].slice(0, 7)}` : '（初始提交，无父提交）'"
+        :to-label="`${commitDiff.commit.shortHash} ${commitDiff.commit.message}`"
+        :initial-path="commitDiff.path"
+        @close="commitDiff = null"
       />
       <MergeDialog
         v-if="active && showMerge"

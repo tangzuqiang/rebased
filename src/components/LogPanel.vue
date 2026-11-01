@@ -43,6 +43,7 @@ const emit = defineEmits<{
   changed: [message?: string];
   amend: [];
   checkout: [name: string];
+  showChanges: [hash: string];
 }>();
 
 const query = ref("");
@@ -188,6 +189,12 @@ function doCheckoutRev() {
 
 function commitLabel(commit: GitCommit) {
   return `${commit.shortHash} ${commit.message}`;
+}
+
+function showChanges() {
+  const commit = selected.value;
+  closeMenu();
+  if (commit) emit("showChanges", commit.hash);
 }
 
 function doCompare() {
@@ -426,6 +433,7 @@ defineExpose({
             :class="{ selected: commit.hash === selectedHash, merge: commit.parents.length > 1 }"
             :title="commit.parents.length > 1 ? '合并提交' : commit.message"
             @click="emit('select', commit.hash)"
+            @dblclick="emit('showChanges', commit.hash)"
             @contextmenu="openMenu($event, commit.hash)"
           >
             <span class="col-msg">
@@ -472,6 +480,8 @@ defineExpose({
     </div>
 
     <PopupMenu :open="menu.open" :x="menu.x" :y="menu.y" @close="closeMenu">
+      <button type="button" @click="showChanges">显示修改内容</button>
+      <div class="divider" />
       <button type="button" @click="copyHash">复制修订号</button>
       <button type="button" :disabled="busy || acting" @click="createPatch">创建补丁…</button>
       <button type="button" :disabled="busy || acting || isHead" @click="doCherryPick">拣选</button>

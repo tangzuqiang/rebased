@@ -17,6 +17,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   close: [];
   commit: [payload: { message: string; amend: boolean; paths: string[]; push: boolean }];
+  deleteUntracked: [paths: string[]];
 }>();
 
 const tab = ref<"commit" | "shelve">("commit");
@@ -67,6 +68,19 @@ const changeChecked = computed(() =>
 const unversionedChecked = computed(() =>
   props.unversioned.length > 0 && props.unversioned.every((file) => selected.value.includes(file.path)),
 );
+const checkedUntracked = computed(() =>
+  props.unversioned.filter((file) => selected.value.includes(file.path)).map((file) => file.path),
+);
+
+function deleteUntracked() {
+  const paths = checkedUntracked.value;
+  if (!paths.length || locked.value) return;
+  const list = paths.slice(0, 10).join("\n");
+  const more = paths.length > 10 ? `\n…等共 ${paths.length} 个` : "";
+  if (!window.confirm(`确定删除以下 ${paths.length} 个未跟踪文件？删除后无法恢复。\n\n${list}${more}`)) return;
+  emit("deleteUntracked", paths);
+}
+
 const addCount = computed(() => lines.value.filter((line) => line.kind === "add").length);
 const delCount = computed(() => lines.value.filter((line) => line.kind === "del").length);
 
@@ -311,15 +325,27 @@ onUnmounted(() => {
               <span class="dir">{{ dirName(file.path) }}</span>
             </button>
 
-            <label class="group">
-              <input
-                type="checkbox"
-                :checked="unversionedChecked"
-                :disabled="!unversioned.length"
-                @change="toggleGroup(unversioned, ($event.target as HTMLInputElement).checked)"
-              />
-              未跟踪 {{ unversioned.length }} 个文件
-            </label>
+            <div class="group-line">
+              <label class="group">
+                <input
+                  type="checkbox"
+                  :checked="unversionedChecked"
+                  :disabled="!unversioned.length"
+                  @change="toggleGroup(unversioned, ($event.target as HTMLInputElement).checked)"
+                />
+                未跟踪 {{ unversioned.length }} 个文件
+              </label>
+              <button
+                v-if="unversioned.length"
+                type="button"
+                class="delete-btn"
+                :disabled="locked || !checkedUntracked.length"
+                :title="checkedUntracked.length ? `删除已勾选的 ${checkedUntracked.length} 个未跟踪文件` : '先勾选要删除的未跟踪文件'"
+                @click="deleteUntracked"
+              >
+                <Icons name="trash" :size="13" />
+              </button>
+            </div>
             <div v-if="!unversioned.length" class="empty-hint short">没有未跟踪文件</div>
             <button
               v-for="file in unversioned"
@@ -466,6 +492,36 @@ onUnmounted(() => {
   gap: 8px;
   padding: 8px 12px 4px;
   color: var(--text);
+}
+
+.group-line {
+  display: flex;
+  align-items: center;
+}
+
+.group-line .group {
+  padding-right: 4px;
+}
+
+.delete-btn {
+  width: 22px;
+  height: 22px;
+  margin-top: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--text-dim);
+}
+
+.delete-btn:hover:not(:disabled) {
+  color: var(--danger);
+  background: var(--bg-selected);
+}
+
+.delete-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 .file {
