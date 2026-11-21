@@ -10,7 +10,7 @@ $pfxPath = Join-Path $secretDir "rebased-codesign.pfx"
 $passPath = Join-Path $secretDir "password.txt"
 
 if (-not (Test-Path $pfxPath)) {
-    throw "找不到签名证书 $pfxPath，请先运行 scripts\signing-cert.ps1"
+    throw "找不到签名证书 $pfxPath，它随仓库提交，请先 git pull 或 git checkout -- scripts/.signing（不要重新生成证书）"
 }
 
 function Find-SignTool {

@@ -164,7 +164,7 @@ function Find-Installer([string]$Version) {
 function Get-SignConfigPath {
     $pfx = Join-Path $PSScriptRoot ".signing\rebased-codesign.pfx"
     if (-not (Test-Path $pfx)) {
-        throw "找不到签名证书 $pfx，请先运行 scripts\signing-cert.ps1"
+        throw "找不到签名证书 $pfx，它随仓库提交，请先 git pull 或 git checkout -- scripts/.signing（不要重新生成证书）"
     }
     $signScript = Join-Path $PSScriptRoot "sign.ps1"
     $config = [ordered]@{
