@@ -3,6 +3,7 @@
     [switch]$SkipPublish,
     [switch]$NoPause,
     [switch]$NoBump,
+    [switch]$NoGit,
     [string]$Notes
 )
 
@@ -292,6 +293,56 @@ function Publish-Installer([string]$Installer, [string]$Version, [string]$Notes)
     Write-Host "清单地址：http://$hostName/rebased/latest.json"
 }
 
+function Assert-UpToDate {
+    $branch = (git -C $root rev-parse --abbrev-ref HEAD).Trim()
+    foreach ($remote in (git -C $root remote)) {
+        git -C $root fetch -q $remote
+        if ($LASTEXITCODE -ne 0) {
+            throw "git fetch $remote 失败，无法确认代码是否最新"
+        }
+        git -C $root rev-parse -q --verify "refs/remotes/$remote/$branch" | Out-Null
+        if ($LASTEXITCODE -ne 0) { continue }
+        $behind = [int](git -C $root rev-list --count "HEAD..$remote/$branch")
+        if ($behind -gt 0) {
+            throw "本地 $branch 落后 $remote/$branch $behind 个提交，请先 git pull --rebase 再发布"
+        }
+    }
+}
+
+function Push-ReleaseCommit([string]$Version, [string]$Notes) {
+    $files = @("src-tauri/Cargo.toml", "src-tauri/Cargo.lock", "src-tauri/tauri.conf.json", "package.json", "update.txt")
+    $branch = (git -C $root rev-parse --abbrev-ref HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or $branch -eq "HEAD") {
+        throw "安装包已发布，但当前不在分支上，无法提交推送"
+    }
+
+    $changed = git -C $root status --porcelain -- $files
+    if ($changed) {
+        $msgFile = Join-Path $env:TEMP "rebased-release-commit.txt"
+        Write-Utf8File $msgFile "chore: 发布版本 $Version`n`n$Notes`n"
+        git -C $root add -- $files
+        git -C $root commit -q -F $msgFile -- $files
+        if ($LASTEXITCODE -ne 0) {
+            throw "安装包已发布，但 git 提交失败（退出码 $LASTEXITCODE）"
+        }
+        Write-Host "  已提交：chore: 发布版本 $Version"
+    } else {
+        Write-Host "  版本文件没有变化，跳过提交"
+    }
+
+    $failed = @()
+    foreach ($remote in (git -C $root remote)) {
+        Write-Host "  推送到 $remote/$branch"
+        git -C $root push $remote "HEAD:refs/heads/$branch"
+        if ($LASTEXITCODE -ne 0) {
+            $failed += $remote
+        }
+    }
+    if ($failed.Count -gt 0) {
+        throw "安装包已发布并已本地提交，但推送到 $($failed -join ', ') 失败。请 git pull --rebase 后手动 git push"
+    }
+}
+
 function Wait-ScriptWindow {
     if ($NoPause) { return }
     if (-not [Environment]::UserInteractive) { return }
@@ -311,6 +362,10 @@ function Wait-ScriptWindow {
 
 $script:exitCode = 0
 try {
+    if (-not ($SkipPublish -or $NoGit)) {
+        Write-Host "检查本地代码是否与远程一致"
+        Assert-UpToDate
+    }
     $info = Resolve-ReleaseInfo
     Write-Host "本次发布：版本 $($info.Version)"
     Write-Host "更新日志："
@@ -357,6 +412,14 @@ try {
     } else {
         Write-Host ""
         Write-Host "3/3 已跳过发布"
+    }
+
+    Write-Host ""
+    if ($SkipPublish -or $NoGit) {
+        Write-Host "已跳过 git 提交推送"
+    } else {
+        Write-Host "提交并推送到 git"
+        Push-ReleaseCommit $info.Version $info.Notes
     }
 
     Write-Host ""
