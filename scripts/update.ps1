@@ -1,7 +1,9 @@
 ﻿param(
     [switch]$SkipBuild,
     [switch]$SkipPublish,
-    [switch]$NoPause
+    [switch]$NoPause,
+    [switch]$NoBump,
+    [string]$Notes
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,6 +42,68 @@ function Read-UpdateFile([string]$Path) {
     return [pscustomobject]@{
         Version = $Matches[1]
         Notes   = $Matches[2].Trim()
+    }
+}
+
+function Get-ProjectVersion {
+    $content = [System.IO.File]::ReadAllText((Join-Path $root "src-tauri\tauri.conf.json"))
+    if ($content -notmatch '"version"\s*:\s*"(\d+\.\d+\.\d+)"') {
+        throw "tauri.conf.json 中没有 x.y.z 格式的版本号"
+    }
+    return $Matches[1]
+}
+
+function Get-NextVersion([string]$Version) {
+    $v = [version]$Version
+    return "{0}.{1}.{2}" -f $v.Major, $v.Minor, ($v.Build + 1)
+}
+
+function Get-LastCommitSubject {
+    $subject = git -C $root log -1 --format=%s
+    if ($LASTEXITCODE -ne 0 -or -not "$subject".Trim()) {
+        throw "无法读取最近一条 git 提交信息，请用 -Notes 指定更新日志"
+    }
+    return "$subject".Trim()
+}
+
+function Add-UpdateEntry([string]$Path, [string]$Version, [string]$Text) {
+    $line = "$Version $Text"
+    if (-not (Test-Path $Path)) {
+        [System.IO.File]::WriteAllText($Path, $line, (New-Object System.Text.UTF8Encoding $true))
+        return
+    }
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+    $content = [System.IO.File]::ReadAllText($Path, $utf8)
+    $newline = if ($content.Contains("`r`n")) { "`r`n" } else { "`n" }
+    if ($content.Length -gt 0 -and -not $content.EndsWith("`n")) {
+        $content += $newline
+    }
+    [System.IO.File]::WriteAllText($Path, $content + $line, (New-Object System.Text.UTF8Encoding $hasBom))
+}
+
+function Resolve-ReleaseInfo {
+    $current = Get-ProjectVersion
+    $last = if (Test-Path $updateFile) { Read-UpdateFile $updateFile } else { $null }
+
+    if ($NoBump -or $SkipBuild) {
+        if (-not $last) { throw "-NoBump / -SkipBuild 需要 update.txt 中已有记录" }
+        Write-Host "沿用 update.txt 最后一行，不自增版本"
+        return $last
+    }
+    if ($last -and ([version]$last.Version -gt [version]$current)) {
+        Write-Host "update.txt 最后一行 $($last.Version) 高于当前版本 $current，按手写记录发布"
+        return $last
+    }
+
+    $next = Get-NextVersion $current
+    $source = if ($Notes) { "-Notes 参数" } else { "最近一条 git 提交" }
+    $text = if ($Notes) { $Notes.Trim() } else { Get-LastCommitSubject }
+    Add-UpdateEntry $updateFile $next $text
+    Write-Host "版本 $current -> $next，更新日志取自$source，已追加到 update.txt"
+    return [pscustomobject]@{
+        Version = $next
+        Notes   = $text
     }
 }
 
@@ -247,8 +311,8 @@ function Wait-ScriptWindow {
 
 $script:exitCode = 0
 try {
-    $info = Read-UpdateFile $updateFile
-    Write-Host "读取 update.txt：版本 $($info.Version)"
+    $info = Resolve-ReleaseInfo
+    Write-Host "本次发布：版本 $($info.Version)"
     Write-Host "更新日志："
     Write-Host $info.Notes
     Write-Host ""
