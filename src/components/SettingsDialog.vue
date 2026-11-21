@@ -59,7 +59,7 @@ async function lookupUpdate() {
 
 async function applyUpdate() {
   installing.value = true;
-  updateHint.value = "正在下载安装包，下载完成后将打开安装向导…";
+  updateHint.value = "正在下载并校验安装包，完成后将静默安装并自动重启…";
   updateHintKind.value = "ok";
   try {
     updateHint.value = await installUpdate();
@@ -156,7 +156,7 @@ async function test() {
       </section>
       <section v-else-if="section === 'update'" class="panel">
         <h3>关于与更新</h3>
-        <p class="muted">当前版本 {{ version || "未知" }}。更新包下载完成后会直接打开安装向导。</p>
+        <p class="muted">当前版本 {{ version || "未知" }}。启动时自动检查，有新版本会校验签名后静默安装并自动重启。</p>
         <p v-if="updateInfo?.notes" class="muted">{{ updateInfo.notes }}</p>
         <p v-if="updateHint" class="hint" :class="updateHintKind">{{ updateHint }}</p>
         <div class="actions">

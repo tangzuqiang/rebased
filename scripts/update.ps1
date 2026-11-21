@@ -96,6 +96,40 @@ function Find-Installer([string]$Version) {
     return $null
 }
 
+function Get-SignConfigPath {
+    $pfx = Join-Path $PSScriptRoot ".signing\rebased-codesign.pfx"
+    if (-not (Test-Path $pfx)) {
+        throw "找不到签名证书 $pfx，请先运行 scripts\signing-cert.ps1"
+    }
+    $signScript = Join-Path $PSScriptRoot "sign.ps1"
+    $config = [ordered]@{
+        bundle = [ordered]@{
+            windows = [ordered]@{
+                signCommand = [ordered]@{
+                    cmd  = "powershell"
+                    args = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $signScript, "%1")
+                }
+            }
+        }
+    }
+    $path = Join-Path $env:TEMP "rebased-sign.conf.json"
+    Write-Utf8File $path ($config | ConvertTo-Json -Depth 6)
+    return $path
+}
+
+function Assert-Signed([string]$Path) {
+    $expected = (Get-Content (Join-Path $root "src-tauri\signing\thumbprint.txt") -Raw).Trim()
+    $sig = Get-AuthenticodeSignature -LiteralPath $Path
+    $status = "$($sig.Status)"
+    if ($status -ne "Valid" -and $status -ne "UnknownError") {
+        throw "安装包签名无效（$status）：$Path"
+    }
+    if ($sig.SignerCertificate.Thumbprint -ne $expected) {
+        throw "安装包签名证书指纹不匹配：$Path"
+    }
+    Write-Host "  签名校验通过：$($sig.SignerCertificate.Subject)"
+}
+
 function Import-UpdateEnv {
     if (Test-Path $envFile) {
         Get-Content $envFile | ForEach-Object {
@@ -153,7 +187,7 @@ function Publish-Installer([string]$Installer, [string]$Version, [string]$Notes)
         notes      = $Notes
         url        = $feedUrl
         sha256     = $hash
-        silentArgs = "/S /R"
+        silentArgs = "/S /R /UPDATE"
     }
     $json = ($manifestObj | ConvertTo-Json -Compress)
     $utf8NoBom = New-Object System.Text.UTF8Encoding $false
@@ -225,10 +259,11 @@ try {
 
     if (-not $SkipBuild) {
         Write-Host ""
-        Write-Host "2/3 打包安装包（npm run tauri build）"
+        Write-Host "2/3 打包并签名安装包（npm run tauri build）"
+        $signConfig = Get-SignConfigPath
         Push-Location $root
         try {
-            npm run tauri build
+            npm run tauri build -- --config $signConfig
             if ($LASTEXITCODE -ne 0) {
                 throw "打包失败，退出码 $LASTEXITCODE"
             }
@@ -253,6 +288,7 @@ try {
     if (-not $SkipPublish) {
         Write-Host ""
         Write-Host "3/3 发布到更新服务器"
+        Assert-Signed $installer.FullName
         Publish-Installer $installer.FullName $info.Version $info.Notes
     } else {
         Write-Host ""

@@ -4,6 +4,7 @@ export interface UpdateInfo {
   notes: string;
   url: string;
   available: boolean;
+  autoInstall: boolean;
 }
 
 export interface AiConfig {

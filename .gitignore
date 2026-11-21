@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 scripts/.update-server.env
+scripts/.signing/
 release/
 
 # Editor directories and files

@@ -5,6 +5,7 @@ import {
   checkUpdate,
   getRecentProjects,
   getSession,
+  installUpdate,
   pickAndOpenRepo,
   recordRecentProject,
   removeRecentProject,
@@ -181,9 +182,17 @@ onMounted(async () => {
     }
   }
   void checkUpdate()
-    .then((info) => {
-      if (info.available) {
+    .then(async (info) => {
+      if (!info.available) return;
+      if (!info.autoInstall) {
         notify(`发现新版本 ${info.latest}，可在设置中更新`);
+        return;
+      }
+      notify(`发现新版本 ${info.latest}，正在后台下载并静默安装…`);
+      try {
+        notify(await installUpdate());
+      } catch (error) {
+        notify(`自动更新失败：${error instanceof Error ? error.message : String(error)}`, "error");
       }
     })
     .catch(() => undefined);
