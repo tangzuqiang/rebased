@@ -131,13 +131,30 @@ fn resolve_new(repo: &Path, rel: &Path) -> Result<PathBuf, String> {
     Ok(parent.join(name))
 }
 
+#[cfg(windows)]
+fn terminal_path(path: PathBuf) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if let Some(stripped) = raw.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{stripped}"))
+    } else if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        path
+    }
+}
+
+#[cfg(not(windows))]
+fn terminal_path(path: PathBuf) -> PathBuf {
+    path
+}
+
 pub fn validate_terminal_cwd(repo: &Path, cwd: &Path) -> Result<PathBuf, String> {
     let root = canonical_root(repo)?;
     let target = fs::canonicalize(cwd).map_err(|error| format!("终端工作目录无效：{error}"))?;
     if !target.is_dir() || !target.starts_with(&root) {
         return Err("终端工作目录必须位于仓库内".to_string());
     }
-    Ok(target)
+    Ok(terminal_path(target))
 }
 
 pub fn list_dir(repo: &Path, rel: Option<&str>) -> Result<Vec<DirEntry>, String> {
@@ -379,6 +396,16 @@ mod tests {
         assert!(list_dir(&repo.0, Some(&repo.0.to_string_lossy())).is_err());
         assert!(list_dir(&repo.0, Some(".git")).is_err());
         assert!(create_worktree_file(&repo.0, "../escape.txt", "").is_err());
+    }
+
+    #[test]
+    fn terminal_cwd_uses_a_shell_friendly_path() {
+        let repo = TestRepo::new();
+        let cwd = validate_terminal_cwd(&repo.0, &repo.0.join("src")).unwrap();
+        assert!(cwd.is_absolute());
+        assert!(cwd.ends_with("src"));
+        #[cfg(windows)]
+        assert!(!cwd.to_string_lossy().starts_with(r"\\?\"));
     }
 
     #[test]
