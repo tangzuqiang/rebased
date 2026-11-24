@@ -131,7 +131,9 @@ fn require_config(store: &AppStore) -> Result<AiConfig, String> {
         return Err("未配置 AI 模型名称，请先在设置中填写".to_string());
     }
     if looks_like_url(&cfg.api_key) {
-        return Err("当前 API Key 填成了网址。请到设置里改成真正的密钥；不需要密钥则留空".to_string());
+        return Err(
+            "当前 API Key 填成了网址。请到设置里改成真正的密钥；不需要密钥则留空".to_string(),
+        );
     }
     Ok(cfg)
 }
@@ -186,20 +188,27 @@ enum ThinkMode {
     Omit,
 }
 
-fn collect_diff_context(repo: &std::path::Path, paths: &[DiffPath]) -> Result<(Vec<String>, String), String> {
+fn collect_diff_context(
+    repo: &std::path::Path,
+    paths: &[DiffPath],
+) -> Result<(Vec<String>, String), String> {
     let mut names = Vec::new();
     let mut snippets = Vec::new();
     for item in paths {
         names.push(item.path.clone());
-        let diff = git::working_diff(repo, &item.path, item.untracked).unwrap_or_else(|_| git::FileDiff {
-            path: item.path.clone(),
-            binary: false,
-            patch: String::new(),
-        });
+        let diff =
+            git::working_diff(repo, &item.path, item.untracked).unwrap_or_else(|_| git::FileDiff {
+                path: item.path.clone(),
+                binary: false,
+                patch: String::new(),
+            });
         let body = if diff.binary {
             format!("文件：{}\n（二进制，已省略内容）", item.path)
         } else if diff.patch.trim().is_empty() {
-            format!("文件：{}\n（没有文本 diff，请根据文件名理解变更）", item.path)
+            format!(
+                "文件：{}\n（没有文本 diff，请根据文件名理解变更）",
+                item.path
+            )
         } else {
             format!("文件：{}\n{}", item.path, diff.patch)
         };
@@ -242,9 +251,7 @@ fn call_chat_api(
 
     loop {
         let body = chat_request_body(cfg, system, user, opts.max_tokens, think_mode);
-        let mut request = agent
-            .post(&url)
-            .header("Content-Type", "application/json");
+        let mut request = agent.post(&url).header("Content-Type", "application/json");
         if !cfg.api_key.is_empty() {
             request = request.header("Authorization", format!("Bearer {}", cfg.api_key));
         }
@@ -264,7 +271,8 @@ fn call_chat_api(
             .body_mut()
             .read_json()
             .map_err(|e| format!("AI 接口返回无法解析：{e}"))?;
-        if !matches!(think_mode, ThinkMode::Omit) && status == 400 && thinking_not_supported(&value) {
+        if !matches!(think_mode, ThinkMode::Omit) && status == 400 && thinking_not_supported(&value)
+        {
             think_mode = ThinkMode::Omit;
             continue;
         }

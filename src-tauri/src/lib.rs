@@ -4,10 +4,12 @@ mod store;
 mod term;
 mod updater;
 mod watch;
+mod workspace;
 
 use git::{
-    AppState, BlameLine, BranchInfo, FileDiff, FilePreview, GitCommit, GitFile, MergeCompare, MergeFileContent,
-    MergeOutcome, MergePreview, MergeState, PullOutcome, RemoteDetail, RepoInfo, StatusPayload,
+    AppState, BlameLine, BranchInfo, FileDiff, FilePreview, GitCommit, GitFile, MergeCompare,
+    MergeFileContent, MergeOutcome, MergePreview, MergeState, PullOutcome, RemoteDetail, RepoInfo,
+    StatusPayload,
 };
 use std::path::PathBuf;
 use store::{AppStore, RecentProject, SessionState};
@@ -42,7 +44,10 @@ async fn get_repo(state: State<'_, AppState>, repo: Option<String>) -> Result<Re
 }
 
 #[tauri::command]
-async fn get_status(state: State<'_, AppState>, repo: Option<String>) -> Result<StatusPayload, String> {
+async fn get_status(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<StatusPayload, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::status(&path)).await
 }
@@ -81,7 +86,10 @@ async fn get_commit_message(
 }
 
 #[tauri::command]
-async fn get_branches(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<BranchInfo>, String> {
+async fn get_branches(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<Vec<BranchInfo>, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::branches(&path)).await
 }
@@ -98,13 +106,21 @@ async fn get_recent_branches(
 }
 
 #[tauri::command]
-async fn stage_file(state: State<'_, AppState>, path: String, repo: Option<String>) -> Result<(), String> {
+async fn stage_file(
+    state: State<'_, AppState>,
+    path: String,
+    repo: Option<String>,
+) -> Result<(), String> {
     let repo = repo_dir(&state, repo)?;
     run_blocking(move || git::stage(&repo, &path)).await
 }
 
 #[tauri::command]
-async fn unstage_file(state: State<'_, AppState>, path: String, repo: Option<String>) -> Result<(), String> {
+async fn unstage_file(
+    state: State<'_, AppState>,
+    path: String,
+    repo: Option<String>,
+) -> Result<(), String> {
     let repo = repo_dir(&state, repo)?;
     run_blocking(move || git::unstage(&repo, &path)).await
 }
@@ -120,7 +136,10 @@ async fn discard_worktree_changes(
 }
 
 #[tauri::command]
-async fn get_head_commit_message(state: State<'_, AppState>, repo: Option<String>) -> Result<String, String> {
+async fn get_head_commit_message(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<String, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::head_commit_message(&path)).await
 }
@@ -138,7 +157,11 @@ async fn commit_changes(
 }
 
 #[tauri::command]
-async fn checkout_branch(state: State<'_, AppState>, name: String, repo: Option<String>) -> Result<(), String> {
+async fn checkout_branch(
+    state: State<'_, AppState>,
+    name: String,
+    repo: Option<String>,
+) -> Result<(), String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::checkout(&path, &name)).await
 }
@@ -150,7 +173,10 @@ async fn fetch_remote(state: State<'_, AppState>, repo: Option<String>) -> Resul
 }
 
 #[tauri::command]
-async fn pull_remote(state: State<'_, AppState>, repo: Option<String>) -> Result<PullOutcome, String> {
+async fn pull_remote(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<PullOutcome, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::pull(&path)).await
 }
@@ -162,7 +188,10 @@ async fn push_remote(state: State<'_, AppState>, repo: Option<String>) -> Result
 }
 
 #[tauri::command]
-async fn sync_pull(state: State<'_, AppState>, repo: Option<String>) -> Result<git::SyncOutcome, String> {
+async fn sync_pull(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<git::SyncOutcome, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::sync_pull(&path)).await
 }
@@ -176,13 +205,20 @@ async fn sync_push(
 ) -> Result<git::SyncOutcome, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || {
-        git::sync_push_to(&path, remote.as_deref().unwrap_or(""), branch.as_deref().unwrap_or(""))
+        git::sync_push_to(
+            &path,
+            remote.as_deref().unwrap_or(""),
+            branch.as_deref().unwrap_or(""),
+        )
     })
     .await
 }
 
 #[tauri::command]
-async fn get_remotes(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<String>, String> {
+async fn get_remotes(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<Vec<String>, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::remotes(&path)).await
 }
@@ -246,13 +282,19 @@ async fn merge_abort(state: State<'_, AppState>, repo: Option<String>) -> Result
 }
 
 #[tauri::command]
-async fn get_merge_state(state: State<'_, AppState>, repo: Option<String>) -> Result<MergeState, String> {
+async fn get_merge_state(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<MergeState, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::merge_state(&path)).await
 }
 
 #[tauri::command]
-async fn merge_continue(state: State<'_, AppState>, repo: Option<String>) -> Result<String, String> {
+async fn merge_continue(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<String, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::merge_continue(&path)).await
 }
@@ -337,7 +379,11 @@ async fn get_recent_projects(app: AppHandle) -> Result<Vec<RecentProject>, Strin
 }
 
 #[tauri::command]
-async fn record_recent_project(app: AppHandle, path: String, name: String) -> Result<Vec<RecentProject>, String> {
+async fn record_recent_project(
+    app: AppHandle,
+    path: String,
+    name: String,
+) -> Result<Vec<RecentProject>, String> {
     run_blocking(move || app.state::<AppStore>().touch_recent(&path, &name)).await
 }
 
@@ -367,7 +413,11 @@ async fn set_app_setting(app: AppHandle, key: String, value: String) -> Result<(
 }
 
 #[tauri::command]
-async fn cherry_pick(state: State<'_, AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
+async fn cherry_pick(
+    state: State<'_, AppState>,
+    hash: String,
+    repo: Option<String>,
+) -> Result<String, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::cherry_pick(&path, &hash)).await
 }
@@ -394,7 +444,11 @@ async fn reset_to(
 }
 
 #[tauri::command]
-async fn revert_commit(state: State<'_, AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
+async fn revert_commit(
+    state: State<'_, AppState>,
+    hash: String,
+    repo: Option<String>,
+) -> Result<String, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::revert_commit(&path, &hash)).await
 }
@@ -429,7 +483,11 @@ async fn create_tag_at(
 }
 
 #[tauri::command]
-async fn format_patch(state: State<'_, AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
+async fn format_patch(
+    state: State<'_, AppState>,
+    hash: String,
+    repo: Option<String>,
+) -> Result<String, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::format_patch(&path, &hash)).await
 }
@@ -440,7 +498,10 @@ async fn write_text_file(path: String, content: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn list_worktree(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<String>, String> {
+async fn list_worktree(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<Vec<String>, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::list_worktree(&path)).await
 }
@@ -456,13 +517,21 @@ async fn abs_worktree_path(
 }
 
 #[tauri::command]
-async fn reveal_in_os(state: State<'_, AppState>, path: String, repo: Option<String>) -> Result<(), String> {
+async fn reveal_in_os(
+    state: State<'_, AppState>,
+    path: String,
+    repo: Option<String>,
+) -> Result<(), String> {
     let repo = repo_dir(&state, repo)?;
     run_blocking(move || git::reveal_in_os(&repo, &path)).await
 }
 
 #[tauri::command]
-async fn open_in_os(state: State<'_, AppState>, path: String, repo: Option<String>) -> Result<(), String> {
+async fn open_in_os(
+    state: State<'_, AppState>,
+    path: String,
+    repo: Option<String>,
+) -> Result<(), String> {
     let repo = repo_dir(&state, repo)?;
     run_blocking(move || git::open_in_os(&repo, &path)).await
 }
@@ -531,13 +600,21 @@ async fn rename_worktree(
 }
 
 #[tauri::command]
-async fn delete_worktree(state: State<'_, AppState>, path: String, repo: Option<String>) -> Result<(), String> {
+async fn delete_worktree(
+    state: State<'_, AppState>,
+    path: String,
+    repo: Option<String>,
+) -> Result<(), String> {
     let repo = repo_dir(&state, repo)?;
     run_blocking(move || git::delete_worktree(&repo, &path)).await
 }
 
 #[tauri::command]
-async fn drop_commit(state: State<'_, AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
+async fn drop_commit(
+    state: State<'_, AppState>,
+    hash: String,
+    repo: Option<String>,
+) -> Result<String, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::drop_commit(&path, &hash)).await
 }
@@ -603,13 +680,21 @@ async fn rev_diff_file(
 }
 
 #[tauri::command]
-async fn fixup_commit(state: State<'_, AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
+async fn fixup_commit(
+    state: State<'_, AppState>,
+    hash: String,
+    repo: Option<String>,
+) -> Result<String, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::fixup_commit(&path, &hash)).await
 }
 
 #[tauri::command]
-async fn squash_commit(state: State<'_, AppState>, hash: String, repo: Option<String>) -> Result<String, String> {
+async fn squash_commit(
+    state: State<'_, AppState>,
+    hash: String,
+    repo: Option<String>,
+) -> Result<String, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::squash_commit(&path, &hash)).await
 }
@@ -648,7 +733,11 @@ async fn set_upstream(
 }
 
 #[tauri::command]
-async fn update_branch(state: State<'_, AppState>, name: String, repo: Option<String>) -> Result<String, String> {
+async fn update_branch(
+    state: State<'_, AppState>,
+    name: String,
+    repo: Option<String>,
+) -> Result<String, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::update_branch(&path, &name)).await
 }
@@ -665,7 +754,11 @@ async fn delete_branch(
 }
 
 #[tauri::command]
-async fn delete_tag(state: State<'_, AppState>, name: String, repo: Option<String>) -> Result<String, String> {
+async fn delete_tag(
+    state: State<'_, AppState>,
+    name: String,
+    repo: Option<String>,
+) -> Result<String, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::delete_tag(&path, &name)).await
 }
@@ -682,7 +775,10 @@ async fn push_tag(
 }
 
 #[tauri::command]
-async fn remote_details(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<RemoteDetail>, String> {
+async fn remote_details(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<Vec<RemoteDetail>, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::remote_details(&path)).await
 }
@@ -699,7 +795,11 @@ async fn add_remote(
 }
 
 #[tauri::command]
-async fn remove_remote(state: State<'_, AppState>, name: String, repo: Option<String>) -> Result<String, String> {
+async fn remove_remote(
+    state: State<'_, AppState>,
+    name: String,
+    repo: Option<String>,
+) -> Result<String, String> {
     let path = repo_dir(&state, repo)?;
     run_blocking(move || git::remove_remote(&path, &name)).await
 }
@@ -716,7 +816,11 @@ async fn set_remote_url(
 }
 
 #[tauri::command]
-async fn apply_patch(state: State<'_, AppState>, path: String, repo: Option<String>) -> Result<String, String> {
+async fn apply_patch(
+    state: State<'_, AppState>,
+    path: String,
+    repo: Option<String>,
+) -> Result<String, String> {
     let repo = repo_dir(&state, repo)?;
     run_blocking(move || git::apply_patch(&repo, &path)).await
 }
@@ -734,21 +838,78 @@ async fn add_worktree(
 }
 
 #[tauri::command]
-async fn remove_worktree(state: State<'_, AppState>, path: String, repo: Option<String>) -> Result<String, String> {
+async fn remove_worktree(
+    state: State<'_, AppState>,
+    path: String,
+    repo: Option<String>,
+) -> Result<String, String> {
     let repo = repo_dir(&state, repo)?;
     run_blocking(move || git::remove_worktree(&repo, &path)).await
 }
 
 #[tauri::command]
+async fn list_dir(
+    state: State<'_, AppState>,
+    rel: Option<String>,
+    repo: Option<String>,
+) -> Result<Vec<workspace::DirEntry>, String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || workspace::list_dir(&repo, rel.as_deref())).await
+}
+
+#[tauri::command]
+async fn create_worktree_file(
+    state: State<'_, AppState>,
+    path: String,
+    content: String,
+    repo: Option<String>,
+) -> Result<(), String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || workspace::create_worktree_file(&repo, &path, &content)).await
+}
+
+#[tauri::command]
+async fn create_worktree_dir(
+    state: State<'_, AppState>,
+    path: String,
+    repo: Option<String>,
+) -> Result<(), String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || workspace::create_worktree_dir(&repo, &path)).await
+}
+
+#[tauri::command]
+async fn search_workspace(
+    state: State<'_, AppState>,
+    query: String,
+    options: workspace::SearchOptions,
+    repo: Option<String>,
+) -> Result<workspace::SearchResult, String> {
+    let repo = repo_dir(&state, repo)?;
+    run_blocking(move || workspace::search_workspace(&repo, &query, &options)).await
+}
+
+#[tauri::command]
 fn start_terminal(
     app: AppHandle,
+    state: State<'_, AppState>,
     hub: State<term::TerminalHub>,
     id: String,
     cwd: String,
     cols: u16,
     rows: u16,
+    repo: Option<String>,
 ) -> Result<(), String> {
-    term::start(&*hub, app, id, cwd, cols, rows)
+    let repo = repo_dir(&state, repo)?;
+    let cwd = workspace::validate_terminal_cwd(&repo, PathBuf::from(cwd).as_path())?;
+    term::start(
+        &*hub,
+        app,
+        id,
+        cwd.to_string_lossy().into_owned(),
+        cols,
+        rows,
+    )
 }
 
 #[tauri::command]
@@ -897,6 +1058,10 @@ pub fn run() {
             apply_patch,
             add_worktree,
             remove_worktree,
+            list_dir,
+            create_worktree_file,
+            create_worktree_dir,
+            search_workspace,
             start_terminal,
             write_terminal,
             resize_terminal,

@@ -58,8 +58,8 @@ import type {
 import CommitDialog from "./CommitDialog.vue";
 import ConflictsDialog from "./ConflictsDialog.vue";
 import ErrorDialog from "./ErrorDialog.vue";
-import FilePreviewDrawer from "./FilePreviewDrawer.vue";
 import FilesPanel from "./FilesPanel.vue";
+import IdeWorkspace from "./IdeWorkspace.vue";
 import LogPanel from "./LogPanel.vue";
 import MergeDialog from "./MergeDialog.vue";
 import MergeEditorPage from "./MergeEditorPage.vue";
@@ -135,7 +135,7 @@ const branchError = ref("");
 const logLoading = ref(false);
 const actionError = ref("");
 const actionErrorTitle = ref("操作失败");
-const logPanel = ref<InstanceType<typeof LogPanel> | null>(null);
+const ideWorkspace = ref<InstanceType<typeof IdeWorkspace> | null>(null);
 const showRemoteDialog = ref(false);
 const remoteList = ref<RemoteDetail[]>([]);
 const remoteFormName = ref("");
@@ -865,8 +865,18 @@ function openConflicts() {
   }
 }
 
-function focusSearch() {
-  logPanel.value?.focusSearch();
+function toggleIde() {
+  if (!repo.value?.isGit) {
+    showFiles.value = true;
+    return;
+  }
+  showFiles.value = !showFiles.value;
+}
+
+async function focusWorkspaceSearch() {
+  showFiles.value = true;
+  await nextTick();
+  ideWorkspace.value?.showSearch();
 }
 
 async function openRemoteDialog() {
@@ -1075,7 +1085,7 @@ onUnmounted(() => {
         :terminal-open="showTerminal"
         :busy-text="statusText"
         :recent-branches="recentBranches"
-        @files="showFiles = !showFiles"
+        @files="toggleIde"
         @terminal="toggleTerminal"
         @open="emit('open')"
         @open-path="emit('openPath', $event)"
@@ -1089,22 +1099,22 @@ onUnmounted(() => {
         @new-branch="openNewBranchFromCurrent"
         @conflicts="openConflicts"
         @settings="emit('settings')"
-        @search="focusSearch"
+        @search="focusWorkspaceSearch"
         @remotes="openRemoteDialog"
         @patch="handleApplyPatch"
         @worktrees="openWorktreeDialog"
         @branch-action="handleBranchAction"
       />
-      <FilePreviewDrawer
+      <div class="workspace-content" :class="{ combined: showFiles && repo.isGit }">
+      <IdeWorkspace
         v-if="showFiles"
+        ref="ideWorkspace"
         :repo-path="repoPath"
-        @close="showFiles = false"
         @changed="() => { markFsDirty(); scheduleGitRefresh('worktree'); }"
         @open-terminal="openTerminalAt"
       />
-      <main v-else class="workspace">
+      <main v-if="repo.isGit" class="workspace" :class="{ compact: showFiles }">
         <LogPanel
-          ref="logPanel"
           :repo="repo"
           :commits="commits"
           :graph="graph"
@@ -1120,8 +1130,15 @@ onUnmounted(() => {
           @checkout="handleCheckout"
           @show-changes="openCommitDiff('', $event)"
         />
-        <FilesPanel :files="commitFiles" :message="commitMessage" :commit="detailCommit" @open="openCommitDiff($event)" />
+        <FilesPanel
+          v-if="!showFiles"
+          :files="commitFiles"
+          :message="commitMessage"
+          :commit="detailCommit"
+          @open="openCommitDiff($event)"
+        />
       </main>
+      </div>
       <TerminalPanel
         v-if="terminalReady"
         v-show="showTerminal"
@@ -1373,6 +1390,25 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   display: flex;
+}
+
+.workspace-content {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+}
+
+.workspace-content.combined > .workspace {
+  flex: 0 1 38%;
+  min-width: 300px;
+  max-width: 560px;
+  border-left: 1px solid var(--border);
+}
+
+.workspace.compact {
+  order: 2;
 }
 
 label {

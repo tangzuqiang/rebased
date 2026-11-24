@@ -23,6 +23,9 @@ import type {
   SessionState,
   StatusPayload,
   UpdateInfo,
+  WorkspaceEntry,
+  WorkspaceSearchOptions,
+  WorkspaceSearchResult,
 } from "./types";
 
 function withRepo(repo: string | undefined, extra: Record<string, unknown> = {}) {
@@ -333,6 +336,37 @@ export function listWorktree(repo?: string) {
   return invoke<string[]>("list_worktree", withRepo(repo));
 }
 
+export function listDir(repo: string | undefined, rel = "") {
+  return invoke<WorkspaceEntry[]>("list_dir", withRepo(repo, { rel: rel || null }));
+}
+
+export function createWorktreeFile(repo: string | undefined, path: string, content = "") {
+  return invoke<void>("create_worktree_file", withRepo(repo, { path, content }));
+}
+
+export function createWorktreeDir(repo: string | undefined, path: string) {
+  return invoke<void>("create_worktree_dir", withRepo(repo, { path }));
+}
+
+export function searchWorkspace(
+  repo: string | undefined,
+  query: string,
+  options: WorkspaceSearchOptions = {},
+) {
+  return invoke<WorkspaceSearchResult>(
+    "search_workspace",
+    withRepo(repo, {
+      query,
+      options: {
+        regex: options.regex ?? false,
+        caseSensitive: options.caseSensitive ?? false,
+        include: options.include ?? [],
+        maxResults: options.maxResults ?? 300,
+      },
+    }),
+  );
+}
+
 export function absWorktreePath(repo: string | undefined, path: string) {
   return invoke<string>("abs_worktree_path", withRepo(repo, { path }));
 }
@@ -373,8 +407,8 @@ export function deleteWorktree(repo: string | undefined, path: string) {
   return invoke<void>("delete_worktree", withRepo(repo, { path }));
 }
 
-export function startTerminal(id: string, cwd: string, cols: number, rows: number) {
-  return invoke<void>("start_terminal", { id, cwd, cols, rows });
+export function startTerminal(repo: string | undefined, id: string, cwd: string, cols: number, rows: number) {
+  return invoke<void>("start_terminal", withRepo(repo, { id, cwd, cols, rows }));
 }
 
 export function writeTerminal(id: string, data: string) {

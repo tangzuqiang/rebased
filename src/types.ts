@@ -113,6 +113,32 @@ export interface FilePreview {
   size: number;
 }
 
+export interface WorkspaceEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+  size: number;
+}
+
+export interface WorkspaceSearchOptions {
+  regex?: boolean;
+  caseSensitive?: boolean;
+  include?: string[];
+  maxResults?: number;
+}
+
+export interface WorkspaceSearchHit {
+  path: string;
+  line: number;
+  column: number;
+  text: string;
+}
+
+export interface WorkspaceSearchResult {
+  hits: WorkspaceSearchHit[];
+  truncated: boolean;
+}
+
 export interface DiffLine {
   kind: "hunk" | "add" | "del" | "ctx";
   text: string;

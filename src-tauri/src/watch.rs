@@ -33,7 +33,10 @@ fn skip_worktree(name: &str) -> bool {
 }
 
 fn skip_git(name: &str) -> bool {
-    matches!(name, "objects" | "logs" | "hooks" | "info" | "modules" | "rr-cache")
+    matches!(
+        name,
+        "objects" | "logs" | "hooks" | "info" | "modules" | "rr-cache"
+    )
 }
 
 fn classify(path: &Path) -> Option<&'static str> {
@@ -47,7 +50,10 @@ fn classify(path: &Path) -> Option<&'static str> {
     if names.iter().any(|name| name.ends_with(".lock")) {
         return None;
     }
-    if let Some(index) = names.iter().position(|name| name.eq_ignore_ascii_case(".git")) {
+    if let Some(index) = names
+        .iter()
+        .position(|name| name.eq_ignore_ascii_case(".git"))
+    {
         let rest = names.get(index + 1).copied().unwrap_or("");
         if rest.is_empty() {
             return Some("git");
@@ -83,7 +89,9 @@ fn normalize_full(path: &str) -> String {
 
 fn rel_under(root: &str, path: &Path) -> Option<String> {
     let root = normalize_full(root).trim_end_matches('/').to_string();
-    let full = normalize_full(&path.to_string_lossy()).trim_end_matches('/').to_string();
+    let full = normalize_full(&path.to_string_lossy())
+        .trim_end_matches('/')
+        .to_string();
     if root.is_empty() || full.len() < root.len() {
         return None;
     }

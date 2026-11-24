@@ -49,7 +49,11 @@ fn shell_command(cwd: &Path) -> CommandBuilder {
                 use std::os::windows::process::CommandExt;
                 probe.creation_flags(0x0800_0000);
             }
-            if probe.output().map(|out| out.status.success()).unwrap_or(false) {
+            if probe
+                .output()
+                .map(|out| out.status.success())
+                .unwrap_or(false)
+            {
                 "pwsh"
             } else {
                 "powershell.exe"
@@ -74,11 +78,22 @@ fn shell_command(cwd: &Path) -> CommandBuilder {
     }
 }
 
-fn lock_map(hub: &TerminalHub) -> Result<std::sync::MutexGuard<'_, HashMap<String, Arc<Session>>>, String> {
-    hub.sessions.lock().map_err(|_| "终端状态锁失败".to_string())
+fn lock_map(
+    hub: &TerminalHub,
+) -> Result<std::sync::MutexGuard<'_, HashMap<String, Arc<Session>>>, String> {
+    hub.sessions
+        .lock()
+        .map_err(|_| "终端状态锁失败".to_string())
 }
 
-pub fn start(hub: &TerminalHub, app: AppHandle, id: String, cwd: String, cols: u16, rows: u16) -> Result<(), String> {
+pub fn start(
+    hub: &TerminalHub,
+    app: AppHandle,
+    id: String,
+    cwd: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
     {
         let mut map = lock_map(hub)?;
         if let Some(session) = map.get(&id) {
@@ -167,7 +182,10 @@ pub fn start(hub: &TerminalHub, app: AppHandle, id: String, cwd: String, cols: u
 pub fn write(hub: &TerminalHub, id: &str, data: &str) -> Result<(), String> {
     let map = lock_map(hub)?;
     let session = map.get(id).ok_or_else(|| "终端尚未启动".to_string())?;
-    let mut writer = session.writer.lock().map_err(|_| "终端写入锁失败".to_string())?;
+    let mut writer = session
+        .writer
+        .lock()
+        .map_err(|_| "终端写入锁失败".to_string())?;
     writer
         .write_all(data.as_bytes())
         .and_then(|_| writer.flush())
@@ -177,7 +195,10 @@ pub fn write(hub: &TerminalHub, id: &str, data: &str) -> Result<(), String> {
 pub fn resize(hub: &TerminalHub, id: &str, cols: u16, rows: u16) -> Result<(), String> {
     let map = lock_map(hub)?;
     let session = map.get(id).ok_or_else(|| "终端尚未启动".to_string())?;
-    let master = session.master.lock().map_err(|_| "终端尺寸锁失败".to_string())?;
+    let master = session
+        .master
+        .lock()
+        .map_err(|_| "终端尺寸锁失败".to_string())?;
     master
         .resize(PtySize {
             rows: rows.max(24),

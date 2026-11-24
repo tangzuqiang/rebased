@@ -143,6 +143,7 @@ onUnmounted(() => {
         v-show="tab.id === activeId"
         :key="tab.id"
         :id="tab.id"
+        :repo-path="repoPath"
         :cwd="tab.cwd || repoPath"
         :active="visible && tab.id === activeId"
         @error="errorText = $event"

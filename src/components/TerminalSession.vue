@@ -9,6 +9,7 @@ import { currentTheme, terminalTheme, type ThemeName } from "../theme";
 
 const props = defineProps<{
   id: string;
+  repoPath: string;
   cwd: string;
   active: boolean;
 }>();
@@ -50,7 +51,7 @@ async function ensureSession() {
       fit?.fit();
     }
     const { cols, rows } = currentSize();
-    await startTerminal(props.id, props.cwd, cols, rows);
+    await startTerminal(props.repoPath, props.id, props.cwd, cols, rows);
     applySize();
     if (props.active) term.focus();
     emit("error", "");

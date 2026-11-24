@@ -3011,6 +3011,7 @@ dependencies = [
  "encoding_rs",
  "notify",
  "portable-pty",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

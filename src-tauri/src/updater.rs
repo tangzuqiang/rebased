@@ -90,7 +90,10 @@ fn prepare_and_launch() -> Result<String, String> {
         return Err(error);
     }
     launch_silent(&package)?;
-    Ok(format!("正在静默安装 {}，完成后会自动重新打开", manifest.version))
+    Ok(format!(
+        "正在静默安装 {}，完成后会自动重新打开",
+        manifest.version
+    ))
 }
 
 fn fetch_manifest() -> Result<UpdateManifest, String> {
@@ -166,7 +169,14 @@ fn verify_signature(package: &Path) -> Result<(), String> {
     let script = "$s = Get-AuthenticodeSignature -LiteralPath $env:REBASED_UPDATE_FILE; \
                   Write-Output (\"{0}|{1}\" -f $s.Status, $s.SignerCertificate.Thumbprint)";
     let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
         .env("REBASED_UPDATE_FILE", package)
         .creation_flags(CREATE_NO_WINDOW)
         .output()

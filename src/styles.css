@@ -38,6 +38,14 @@
   --diff-added-bg: #1f3d28;
   --diff-deleted-bg: #3d2224;
   --diff-conflict-bg: #4a2a4a;
+  --tok-keyword: #cf8e6d;
+  --tok-string: #6aab73;
+  --tok-number: #2aacb8;
+  --tok-comment: #7a7e85;
+  --tok-type: #d5b778;
+  --tok-property: #c77dbb;
+  --tok-meta: #b3ae60;
+  --tok-func: #56a8f5;
   font-family: "Segoe UI", "Microsoft YaHei", Inter, system-ui, sans-serif;
   font-size: 12px;
   color: var(--text);
@@ -79,6 +87,14 @@ html[data-theme="light"] {
   --diff-added-bg: #d8f3e0;
   --diff-deleted-bg: #ffd6d6;
   --diff-conflict-bg: #f3d4f3;
+  --tok-keyword: #0033b3;
+  --tok-string: #067d17;
+  --tok-number: #1750eb;
+  --tok-comment: #8c8c8c;
+  --tok-type: #0033b3;
+  --tok-property: #871094;
+  --tok-meta: #9e880d;
+  --tok-func: #00627a;
   color-scheme: light;
 }
 

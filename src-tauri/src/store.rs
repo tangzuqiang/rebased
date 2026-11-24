@@ -204,7 +204,9 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
 
 fn migrate_ai_json(conn: &Connection) {
     let exists: Option<String> = conn
-        .query_row("SELECT value FROM settings WHERE key = 'ai'", [], |row| row.get(0))
+        .query_row("SELECT value FROM settings WHERE key = 'ai'", [], |row| {
+            row.get(0)
+        })
         .optional()
         .ok()
         .flatten();
@@ -227,7 +229,9 @@ fn migrate_ai_json(conn: &Connection) {
 }
 
 fn db_path() -> Result<PathBuf, String> {
-    Ok(data_dir().ok_or_else(|| "无法确定配置目录".to_string())?.join("rebased.db"))
+    Ok(data_dir()
+        .ok_or_else(|| "无法确定配置目录".to_string())?
+        .join("rebased.db"))
 }
 
 fn data_dir() -> Option<PathBuf> {
