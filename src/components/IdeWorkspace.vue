@@ -8,6 +8,7 @@ import {
   deleteWorktree,
   listDir,
   previewFile,
+  revealInOs,
   renameWorktree,
   saveWorktreeFile,
   searchWorkspace,
@@ -296,13 +297,31 @@ function showExplorer() {
   mode.value = "explorer";
 }
 
+async function copyEntryPath(item: TreeItem, full: boolean) {
+  try {
+    const path = full ? await absWorktreePath(props.repoPath, item.path) : item.path;
+    await navigator.clipboard.writeText(path);
+    notify(full ? "已复制完整路径" : "已复制路径");
+  } catch (error) {
+    notify(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
+async function revealEntry(item: TreeItem) {
+  try {
+    await revealInOs(props.repoPath, item.path);
+  } catch (error) {
+    notify(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
 function openMenu(event: MouseEvent, item: TreeItem) {
   event.preventDefault();
   selectedEntry.value = item;
   menu.value = {
     open: true,
     x: Math.min(event.clientX, window.innerWidth - 220),
-    y: Math.min(event.clientY, window.innerHeight - 180),
+    y: Math.min(event.clientY, window.innerHeight - 260),
     item,
   };
 }
@@ -445,6 +464,9 @@ defineExpose({ showSearch, showExplorer });
           <button v-if="menu.item?.isDir" @click="closeMenu(); createEntry('file')">新建文件…</button>
           <button v-if="menu.item?.isDir" @click="closeMenu(); createEntry('dir')">新建文件夹…</button>
           <button @click="closeMenu(); menu.item && renameEntry(menu.item)">重命名…</button>
+          <button @click="closeMenu(); menu.item && copyEntryPath(menu.item, false)">复制路径</button>
+          <button @click="closeMenu(); menu.item && copyEntryPath(menu.item, true)">复制完整路径</button>
+          <button @click="closeMenu(); menu.item && revealEntry(menu.item)">在资源管理器中打开</button>
           <button @click="closeMenu(); openTerminal(menu.item)">在终端中打开</button>
           <div class="divider" />
           <button class="danger" @click="closeMenu(); menu.item && deleteEntry(menu.item)">删除…</button>
