@@ -23,6 +23,7 @@
   --bg-editor: #282c34;
   --text-editor: #abb2bf;
   --text-editor-muted: #9aa3ad;
+  --editor-selection: #41464e;
   --border-elevated: #54575b;
   --scrollbar: #4d4e51;
   --link: #7cb7ff;
@@ -72,6 +73,7 @@ html[data-theme="light"] {
   --bg-editor: #ffffff;
   --text-editor: #1f2328;
   --text-editor-muted: #5c6370;
+  --editor-selection: #41464e;
   --border-elevated: #c5cad3;
   --scrollbar: #c5cad3;
   --link: #2458c5;

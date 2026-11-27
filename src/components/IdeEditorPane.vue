@@ -132,7 +132,16 @@ defineExpose({
 
 .ide-editor-pane :deep(.cm-selectionBackground),
 .ide-editor-pane :deep(.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground) {
-  background: rgba(53, 116, 240, 0.35);
+  background: var(--editor-selection) !important;
+}
+
+.ide-editor-pane :deep(.cm-content::selection),
+.ide-editor-pane :deep(.cm-content *::selection) {
+  color: #cfdffd;
+}
+
+.ide-editor-pane :deep(.cm-selectionMatch) {
+  background: rgba(207, 223, 253, 0.2) !important;
 }
 
 .ide-editor-pane :deep(.cm-panels) {
